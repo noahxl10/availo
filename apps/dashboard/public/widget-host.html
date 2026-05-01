@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>Availo Widget Host Verification</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #f8f8f7;
+        color: #1a1916;
+        font-family: "DM Sans", "Helvetica Neue", Helvetica, sans-serif;
+      }
+
+      .host-page {
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) minmax(280px, 400px);
+        gap: 48px;
+        align-items: start;
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 64px 24px;
+      }
+
+      .host-copy {
+        padding-top: 24px;
+      }
+
+      .host-copy h1 {
+        margin: 0 0 12px;
+        color: #1a1916;
+        font-family: "DM Sans", "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 42px;
+        line-height: 1.05;
+      }
+
+      .host-copy p {
+        max-width: 440px;
+        color: #5c5852;
+        font-family: "DM Sans", "Helvetica Neue", Helvetica, sans-serif;
+        font-size: 16px;
+        line-height: 1.6;
+      }
+
+      .host-note {
+        margin-top: 24px;
+        padding: 16px;
+        border: 1px solid #e4e2de;
+        border-radius: 14px;
+        background: #ffffff;
+        color: #5c5852;
+        font-family: "DM Sans", "Helvetica Neue", Helvetica, sans-serif;
+      }
+
+      .mobile-widget-copy {
+        display: none;
+      }
+
+      @media (max-width: 720px) {
+        body {
+          background: #f8f8f7;
+        }
+
+        .host-page {
+          display: block;
+          padding: 16px;
+        }
+
+        .host-copy {
+          display: none;
+          padding-top: 0;
+          margin-bottom: 16px;
+        }
+
+        .mobile-widget-copy {
+          display: block;
+          margin-bottom: 16px;
+        }
+
+        .mobile-widget-copy h1 {
+          margin: 0 0 4px;
+          color: #1a1916;
+          font-family: "DM Sans", "Helvetica Neue", Helvetica, sans-serif;
+          font-size: 16px;
+          font-weight: 700;
+          line-height: 1.2;
+        }
+
+        .mobile-widget-copy p {
+          margin: 0;
+          color: #7d7970;
+          font-family: "DM Sans", "Helvetica Neue", Helvetica, sans-serif;
+          font-size: 12px;
+          line-height: 1.4;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="host-page">
+      <section class="host-copy">
+        <h1>Host Site Booking Embed</h1>
+        <p>This page intentionally uses loud global CSS to verify that the embedded Availo widget keeps its own typography, colors, radii, and button styles.</p>
+        <div class="host-note">The widget below should still render with DM Sans, #1e8f88 accent controls, rounded cards, and clean compact behavior on mobile.</div>
+      </section>
+
+      <section class="mobile-widget-copy">
+        <h1>Morning Kayak Tour</h1>
+        <p>Ocean Tours Co. - 2 hours - from $65</p>
+      </section>
+
+      <section aria-label="Availo booking widget">
+        <div data-availo-widget></div>
+      </section>
+    </main>
+
+    <script src="/embed/availo-booking-widget.js"></script>
+  </body>
+</html>
