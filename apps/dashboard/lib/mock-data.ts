@@ -55,96 +55,68 @@ export const mobileNavItems: NavItem[] = [
 ];
 
 export const stats: Stat[] = [
-  { label: "Bookings this month", value: "84", delta: "12%", sub: "vs last month" },
-  { label: "Revenue this month", value: "$6,240", delta: "8.4%", sub: "vs last month" },
-  { label: "Upcoming", value: "23", sub: "next in 4h" },
-  { label: "Avg. party size", value: "3.2", delta: "0.4", sub: "vs last month" },
+  { label: "Bookings this month", value: "4", delta: "44%", sub: "vs same time last year" },
+  { label: "Revenue this month", value: "$493.68", delta: "8.5%", sub: "tax included" },
+  { label: "Upcoming", value: "4", sub: "next at 9:30 AM" },
+  { label: "Avg. party size", value: "1.8", delta: "7 pax", sub: "total pax" },
 ];
 
 export const bookings: Booking[] = [
   {
-    initials: "LM",
-    name: "Lena Marsh",
-    listing: "Morning Kayak Tour",
-    date: "May 8 · 9:00 AM",
-    guests: 3,
-    total: "$195",
-    status: "confirmed",
-  },
-  {
-    initials: "RJ",
-    name: "Ray Johansson",
-    listing: "Sunset Paddleboard",
-    date: "May 8 · 5:30 PM",
+    initials: "AR",
+    name: "Alex Rivera",
+    listing: "Harbor Kayak Tour",
+    date: "May 5 · 9:30 AM",
     guests: 2,
-    total: "$130",
+    total: "$141.05",
     status: "confirmed",
   },
   {
-    initials: "DC",
-    name: "Dana Cruz",
-    listing: "Full-Day Sea Cave Tour",
-    date: "May 9 · 8:00 AM",
-    guests: 6,
-    total: "$540",
-    status: "pending",
+    initials: "ML",
+    name: "Morgan Lee",
+    listing: "Harbor Kayak Tour",
+    date: "May 4 · 12:30 PM",
+    guests: 2,
+    total: "$141.05",
+    status: "confirmed",
   },
   {
-    initials: "MO",
-    name: "Mikael Osei",
-    listing: "Snorkel Adventure",
-    date: "May 10 · 10:00 AM",
-    guests: 4,
-    total: "$280",
+    initials: "CN",
+    name: "Casey Nguyen",
+    listing: "Harbor Kayak Tour",
+    date: "May 2 · 3:30 PM",
+    guests: 2,
+    total: "$141.05",
+    status: "confirmed",
+  },
+  {
+    initials: "JP",
+    name: "Jordan Patel",
+    listing: "Harbor Kayak Tour",
+    date: "Mar 2 · 11:00 AM",
+    guests: 1,
+    total: "$70.53",
     status: "confirmed",
   },
 ];
 
 export const listings: Listing[] = [
   {
-    title: "Morning Kayak Tour",
-    type: "Tour · 2 hours",
+    title: "Harbor Kayak Tour",
+    type: "Tour · 1 hour",
     price: "$65/guest",
-    capacity: 8,
-    status: "active",
-  },
-  {
-    title: "Sunset Paddleboard",
-    type: "Rental · 1.5 hours",
-    price: "$45/guest",
-    capacity: 6,
-    status: "active",
-  },
-  {
-    title: "Junior Ocean Class",
-    type: "Class · 1 hour",
-    price: "$35/guest",
-    capacity: 8,
-    status: "draft",
-  },
-  {
-    title: "Full-Day Sea Cave Tour",
-    type: "Tour · 8 hours",
-    price: "$120/guest",
-    capacity: 10,
-    status: "active",
-  },
-  {
-    title: "Snorkel Adventure",
-    type: "Tour · 3 hours",
-    price: "$70/guest",
     capacity: 12,
     status: "active",
   },
   {
-    title: "Corporate Team Paddle",
-    type: "Event · 4 hours",
-    price: "$200/group",
-    capacity: 20,
+    title: "Private Group Paddle",
+    type: "Private · 1 hour",
+    price: "$0/guest",
+    capacity: 12,
     status: "pending",
     statusLabel: "paused",
   },
 ];
 
-export const bookedDates = [1, 2, 6, 7, 8, 9, 14, 15, 16, 22, 23, 29];
-export const fullDates = [8, 15];
+export const bookedDates = [2, 4, 5];
+export const fullDates: number[] = [];

@@ -846,6 +846,38 @@ button {
   gap: var(--availo-space-3);
 }
 
+.api-status {
+  display: inline-flex;
+  width: max-content;
+  align-items: center;
+  gap: var(--availo-space-2);
+  margin: calc(var(--availo-space-5) * -1) 0 var(--availo-space-5);
+  padding: 5px 9px;
+  border: 1px solid var(--availo-color-border);
+  border-radius: 7px;
+  background: var(--availo-color-surface);
+  color: var(--availo-color-muted);
+  font-size: 12px;
+  font-weight: var(--availo-font-weight-semibold);
+  line-height: 1;
+}
+
+.api-status::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--availo-color-neutral-300);
+  content: "";
+}
+
+.api-status[data-status="live"]::before {
+  background: var(--availo-color-success);
+}
+
+.api-status[data-status="fallback"]::before {
+  background: var(--availo-color-warning);
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1132,6 +1164,139 @@ button {
   justify-content: space-between;
   gap: var(--availo-space-4);
   margin-bottom: var(--availo-space-5);
+}
+
+.availability-layout {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: var(--availo-space-5);
+}
+
+.availability-panel,
+.capacity-panel,
+.customer-table,
+.analytics-panel {
+  overflow: hidden;
+  border: 1px solid var(--availo-color-border);
+  border-radius: var(--availo-radius-lg);
+  background: var(--availo-color-surface);
+  box-shadow: var(--availo-shadow-xs);
+}
+
+.capacity-panel {
+  grid-column: 1 / -1;
+}
+
+.schedule-list,
+.capacity-list,
+.customer-list,
+.analytics-bars {
+  display: flex;
+  flex-direction: column;
+}
+
+.schedule-row,
+.capacity-row,
+.customer-row {
+  display: grid;
+  align-items: center;
+  gap: var(--availo-space-4);
+  padding: var(--availo-space-3) var(--availo-space-5);
+  border-top: 1px solid var(--availo-color-neutral-100);
+}
+
+.schedule-row {
+  grid-template-columns: 112px minmax(0, 1fr) auto;
+}
+
+.capacity-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.customer-row {
+  grid-template-columns: calc(var(--availo-space-8) + var(--availo-space-1)) minmax(0, 1fr) auto auto auto;
+}
+
+.schedule-row__date {
+  color: var(--availo-color-accent);
+  font-size: var(--availo-font-size-xs);
+  font-weight: var(--availo-font-weight-bold);
+}
+
+.schedule-row strong,
+.capacity-row strong,
+.customer-row strong {
+  display: block;
+  color: var(--availo-color-text);
+  font-size: var(--availo-font-size-sm);
+  font-weight: var(--availo-font-weight-semibold);
+}
+
+.schedule-row span,
+.capacity-row span,
+.customer-row span {
+  color: var(--availo-color-muted);
+  font-size: var(--availo-font-size-xs);
+}
+
+.capacity-row b {
+  display: flex;
+  width: var(--availo-space-9);
+  height: var(--availo-space-9);
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--availo-radius-md);
+  background: var(--availo-color-accent-50);
+  color: var(--availo-color-accent-600);
+  font-size: var(--availo-font-size-sm);
+}
+
+.customer-row__identity {
+  min-width: 0;
+}
+
+.customer-row__identity span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--availo-space-5);
+}
+
+.analytics-bars {
+  gap: var(--availo-space-4);
+  padding: var(--availo-space-5);
+}
+
+.analytics-bars div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--availo-space-3);
+}
+
+.analytics-bars span {
+  color: var(--availo-color-muted);
+  font-size: var(--availo-font-size-xs);
+  font-weight: var(--availo-font-weight-semibold);
+}
+
+.analytics-bars i {
+  display: block;
+  max-width: 100%;
+  height: var(--availo-space-3);
+  border-radius: var(--availo-radius-pill);
+  background: var(--availo-color-accent);
+}
+
+.analytics-bars b {
+  color: var(--availo-color-text);
+  font-size: var(--availo-font-size-sm);
 }
 
 .listing-search {
@@ -1565,8 +1730,14 @@ button {
   .workspace-grid,
   .create-grid,
   .detail-grid,
-  .embed-grid {
+  .embed-grid,
+  .availability-layout,
+  .analytics-grid {
     grid-template-columns: 1fr;
+  }
+
+  .capacity-panel {
+    grid-column: auto;
   }
 }
 
@@ -1682,6 +1853,28 @@ button {
   .create-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .schedule-row,
+  .customer-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .schedule-row__date,
+  .customer-row .booking-row__avatar {
+    grid-column: 1 / -1;
+  }
+
+  .customer-row__identity {
+    grid-column: 1;
+  }
+
+  .analytics-bars div {
+    grid-template-columns: 1fr auto;
+  }
+
+  .analytics-bars i {
+    grid-column: 1 / -1;
   }
 
   .listing-search {

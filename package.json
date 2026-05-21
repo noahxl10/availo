@@ -1,6 +1,7 @@
 {
   "name": "availo",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -8,8 +9,15 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace @availo/dashboard",
+    "dev:api": "npm run dev --workspace @availo/api",
+    "start:api": "npm run start --workspace @availo/api",
+    "start:dashboard": "npm run start --workspace @availo/dashboard",
     "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "db:generate": "npm run prisma:generate --workspace @availo/api",
+    "db:migrate": "npm run prisma:migrate --workspace @availo/api",
+    "db:seed": "npm run prisma:seed --workspace @availo/api"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

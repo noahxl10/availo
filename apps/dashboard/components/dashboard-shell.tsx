@@ -1,28 +1,27 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Badge, BrandLockup, Button, Card, EmptyState, Input, Select, StatCard, Textarea } from "@availo/ui";
 import {
-  bookedDates,
-  bookings,
   bottomNavItems,
-  fullDates,
-  listings,
   mobileNavItems,
   navItems,
-  stats,
 } from "../lib/mock-data";
+import { fallbackOverview, fetchDashboardOverview, type DashboardOverview } from "../lib/api-data";
 
-type Screen = "dashboard" | "listings" | "create" | "booking" | "embed";
+type Screen = "dashboard" | "listings" | "create" | "booking" | "availability" | "customers" | "embed" | "analytics";
 type ListingTab = "details" | "pricing" | "availability" | "add-ons";
 
-const addonPrices = [15, 35, 75] as const;
+const addonPrices = [28, 17, 0] as const;
 
 function navIdToScreen(id: string): Screen | null {
   if (id === "dashboard") return "dashboard";
   if (id === "listings") return "listings";
   if (id === "bookings") return "booking";
+  if (id === "availability") return "availability";
+  if (id === "customers") return "customers";
   if (id === "embed") return "embed";
+  if (id === "analytics") return "analytics";
   return null;
 }
 
@@ -30,19 +29,51 @@ export function DashboardShell() {
   const [activeNav, setActiveNav] = useState<Screen>("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [listingTab, setListingTab] = useState<ListingTab>("details");
+  const [overview, setOverview] = useState<DashboardOverview>(fallbackOverview);
+  const [apiStatus, setApiStatus] = useState<"loading" | "live" | "fallback">("loading");
+
+  useEffect(() => {
+    let active = true;
+    fetchDashboardOverview()
+      .then((nextOverview) => {
+        if (!active) return;
+        setOverview(nextOverview);
+        setApiStatus("live");
+      })
+      .catch((error: unknown) => {
+        console.warn("Dashboard API unavailable; using local fallback data.", error);
+        if (active) setApiStatus("fallback");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const activeListingCount = overview.listings.filter((listing) => listing.status === "active").length;
+  const customerCount = new Set(overview.bookings.map((booking) => booking.name)).size;
+  const businessName = overview.business?.name ?? "Sample Tours Co.";
+  const primaryListing = overview.listings[0] ?? fallbackOverview.listings[0]!;
+  const primaryBooking = overview.bookings[0] ?? fallbackOverview.bookings[0]!;
+
   const pageTitle = {
-    dashboard: "Good morning, Jamie",
+    dashboard: "Good morning",
     listings: "Listings",
     create: "New Listing",
     booking: "#BK-20485",
+    availability: "Availability",
+    customers: "Customers",
     embed: "Embed Widget",
+    analytics: "Analytics",
   }[activeNav];
   const pageSubtitle = {
-    dashboard: "Friday, May 1, 2026 · Ocean Tours Co.",
-    listings: "6 listings · 4 active",
+    dashboard: `Tuesday, May 5, 2026 · ${businessName}`,
+    listings: `${overview.listings.length} listings · ${activeListingCount} active`,
     create: "Create or edit the customer-facing booking experience.",
-    booking: "Morning Kayak Tour · May 8, 2026 · 9:00 AM",
+    booking: `${primaryBooking.listing} · ${primaryBooking.date}`,
+    availability: "May schedule, capacity, and booked days from the live API.",
+    customers: `${customerCount} customers from recent booking activity.`,
     embed: "Add a booking widget to any website in under 5 minutes.",
+    analytics: `Revenue and demand signals for ${businessName}.`,
   }[activeNav];
 
   return (
@@ -88,10 +119,10 @@ export function DashboardShell() {
           ))}
 
           <div className="dashboard-user">
-            <div className="dashboard-user__avatar">JM</div>
+            <div className="dashboard-user__avatar">AO</div>
             <div className="dashboard-user__copy">
-              <div>Jamie Miller</div>
-              <span>Ocean Tours Co.</span>
+              <div>Admin Operator</div>
+              <span>{businessName}</span>
             </div>
           </div>
 
@@ -127,11 +158,18 @@ export function DashboardShell() {
           </div>
         </header>
 
-        {activeNav === "dashboard" && <DashboardOverview onBooking={() => setActiveNav("booking")} />}
-        {activeNav === "listings" && <ListingsManager onCreate={() => setActiveNav("create")} />}
-        {activeNav === "create" && <CreateListing listingTab={listingTab} setListingTab={setListingTab} />}
-        {activeNav === "booking" && <BookingDetail />}
-        {activeNav === "embed" && <EmbedSetup />}
+        <div className="api-status" data-status={apiStatus}>
+          {apiStatus === "live" ? "Live API" : apiStatus === "loading" ? "Connecting API" : "Fallback data"}
+        </div>
+
+        {activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={() => setActiveNav("booking")} />}
+        {activeNav === "listings" && <ListingsManager listings={overview.listings} onCreate={() => setActiveNav("create")} />}
+        {activeNav === "create" && <CreateListing listingTab={listingTab} listings={overview.listings} setListingTab={setListingTab} />}
+        {activeNav === "booking" && <BookingDetail booking={primaryBooking} listing={primaryListing} />}
+        {activeNav === "availability" && <AvailabilityManager overview={overview} />}
+        {activeNav === "customers" && <CustomersManager bookings={overview.bookings} />}
+        {activeNav === "embed" && <EmbedSetup businessName={businessName} listing={primaryListing} />}
+        {activeNav === "analytics" && <AnalyticsManager overview={overview} />}
       </main>
 
       <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
@@ -151,38 +189,38 @@ export function DashboardShell() {
   );
 }
 
-function DashboardOverview({ onBooking }: { onBooking: () => void }) {
+function DashboardOverview({ onBooking, overview }: { onBooking: () => void; overview: DashboardOverview }) {
   return (
     <>
       <section className="stat-grid" aria-label="Dashboard metrics">
-        {stats.map((stat) => (
+        {overview.stats.map((stat) => (
           <StatCard key={stat.label} label={stat.label} value={stat.value} sub={stat.sub} {...(stat.delta ? { delta: stat.delta } : {})} />
         ))}
       </section>
       <section className="workspace-grid">
-        <RecentBookings onBooking={onBooking} />
-        <MiniCalendar />
+        <RecentBookings bookings={overview.bookings} onBooking={onBooking} />
+        <MiniCalendar bookedDates={overview.bookedDates} fullDates={overview.fullDates} />
       </section>
-      <ListingGrid />
+      <ListingGrid listings={overview.listings} />
     </>
   );
 }
 
-function RecentBookings({ onBooking }: { onBooking: () => void }) {
+function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["bookings"]; onBooking: () => void }) {
   return (
     <Card className="recent-bookings" padded={false}>
       <div className="card-header">
         <div>
           <h2>Recent Bookings</h2>
-          <p>Mock activity for dashboard layout</p>
+          <p>Latest activity from the live API</p>
         </div>
         <button className="text-action" type="button">
           View all →
         </button>
       </div>
       <div className="booking-list">
-        {bookings.map((booking) => (
-          <button className="booking-row" key={booking.name} onClick={onBooking} type="button">
+        {bookings.map((booking, index) => (
+          <button className="booking-row" key={booking.id ?? `${booking.name}-${index}`} onClick={onBooking} type="button">
             <span className="booking-row__avatar">{booking.initials}</span>
             <span className="booking-row__copy">
               <strong>{booking.name}</strong>
@@ -199,7 +237,7 @@ function RecentBookings({ onBooking }: { onBooking: () => void }) {
   );
 }
 
-function MiniCalendar() {
+function MiniCalendar({ bookedDates, fullDates }: { bookedDates: number[]; fullDates: number[] }) {
   return (
     <Card className="mini-calendar">
       <div className="mini-calendar__header">
@@ -232,7 +270,7 @@ function MiniCalendar() {
   );
 }
 
-function ListingGrid() {
+function ListingGrid({ listings }: { listings: DashboardOverview["listings"] }) {
   return (
     <section className="listing-grid" aria-label="Listings">
       {listings.slice(0, 3).map((listing) => <ListingCard key={listing.title} listing={listing} />)}
@@ -240,7 +278,7 @@ function ListingGrid() {
   );
 }
 
-function ListingCard({ listing }: { listing: (typeof listings)[number] }) {
+function ListingCard({ listing }: { listing: DashboardOverview["listings"][number] }) {
   return (
     <Card className="listing-card" padded={false} interactive>
       <div className="listing-card__media">
@@ -259,7 +297,7 @@ function ListingCard({ listing }: { listing: (typeof listings)[number] }) {
   );
 }
 
-function ListingsManager({ onCreate }: { onCreate: () => void }) {
+function ListingsManager({ listings, onCreate }: { listings: DashboardOverview["listings"]; onCreate: () => void }) {
   return (
     <>
       <div className="listings-toolbar">
@@ -276,7 +314,157 @@ function ListingsManager({ onCreate }: { onCreate: () => void }) {
   );
 }
 
-function CreateListing({ listingTab, setListingTab }: { listingTab: ListingTab; setListingTab: (tab: ListingTab) => void }) {
+function AvailabilityManager({ overview }: { overview: DashboardOverview }) {
+  return (
+    <div className="availability-layout">
+      <MiniCalendar bookedDates={overview.bookedDates} fullDates={overview.fullDates} />
+      <section className="availability-panel" aria-label="Upcoming schedule">
+        <div className="card-header">
+          <div>
+            <h2>Upcoming Schedule</h2>
+            <p>{overview.bookings.length} bookings across {overview.bookedDates.length} booked days</p>
+          </div>
+          <Badge status="active">Live</Badge>
+        </div>
+        <div className="schedule-list">
+          {overview.bookings.map((booking, index) => (
+            <div className="schedule-row" key={booking.id ?? `${booking.name}-${index}`}>
+              <span className="schedule-row__date">{booking.date}</span>
+              <div>
+                <strong>{booking.listing}</strong>
+                <span>{booking.name} · {booking.guests} guests</span>
+              </div>
+              <Badge status={booking.status} />
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="capacity-panel" aria-label="Listing capacity">
+        <div className="card-header">
+          <div>
+            <h2>Capacity</h2>
+            <p>Per-booking limits by listing</p>
+          </div>
+        </div>
+        <div className="capacity-list">
+          {overview.listings.map((listing) => (
+            <div className="capacity-row" key={listing.id ?? listing.title}>
+              <div>
+                <strong>{listing.title}</strong>
+                <span>{listing.type}</span>
+              </div>
+              <b>{listing.capacity}</b>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CustomersManager({ bookings }: { bookings: DashboardOverview["bookings"] }) {
+  const customers = bookings.map((booking) => ({
+    initials: booking.initials,
+    name: booking.name,
+    lastBooking: booking.listing,
+    date: booking.date,
+    guests: booking.guests,
+    value: booking.total,
+    status: booking.status
+  }));
+
+  return (
+    <section className="customer-table" aria-label="Customers">
+      <div className="card-header">
+        <div>
+          <h2>Customer List</h2>
+          <p>Recent guests pulled from booking records</p>
+        </div>
+        <Button variant="secondary" type="button">Export CSV</Button>
+      </div>
+      <div className="customer-list">
+        {customers.map((customer) => (
+          <div className="customer-row" key={`${customer.name}-${customer.date}`}>
+            <span className="booking-row__avatar">{customer.initials}</span>
+            <div className="customer-row__identity">
+              <strong>{customer.name}</strong>
+              <span>{customer.lastBooking} · {customer.date}</span>
+            </div>
+            <span>{customer.guests} guests</span>
+            <strong>{customer.value}</strong>
+            <Badge status={customer.status} />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AnalyticsManager({ overview }: { overview: DashboardOverview }) {
+  const confirmedBookings = overview.bookings.filter((booking) => booking.status === "confirmed").length;
+  const pendingBookings = overview.bookings.length - confirmedBookings;
+
+  return (
+    <>
+      <section className="stat-grid" aria-label="Analytics metrics">
+        {overview.stats.map((stat) => (
+          <StatCard key={stat.label} label={stat.label} value={stat.value} sub={stat.sub} {...(stat.delta ? { delta: stat.delta } : {})} />
+        ))}
+      </section>
+      <div className="analytics-grid">
+        <section className="analytics-panel" aria-label="Booking mix">
+          <div className="card-header">
+            <div>
+              <h2>Booking Mix</h2>
+              <p>Current confirmed and pending demand</p>
+            </div>
+          </div>
+          <div className="analytics-bars">
+            <div>
+              <span>Confirmed</span>
+              <i style={{ inlineSize: `${Math.max(confirmedBookings, 1) * 24}%` }} />
+              <b>{confirmedBookings}</b>
+            </div>
+            <div>
+              <span>Pending</span>
+              <i style={{ inlineSize: `${Math.max(pendingBookings, 1) * 24}%` }} />
+              <b>{pendingBookings}</b>
+            </div>
+          </div>
+        </section>
+        <section className="analytics-panel" aria-label="Top listings">
+          <div className="card-header">
+            <div>
+              <h2>Top Listings</h2>
+              <p>Booked experiences in recent activity</p>
+            </div>
+          </div>
+          <div className="capacity-list">
+            {overview.bookings.map((booking) => (
+              <div className="capacity-row" key={booking.id ?? `${booking.name}-${booking.listing}`}>
+                <div>
+                  <strong>{booking.listing}</strong>
+                  <span>{booking.name}</span>
+                </div>
+                <b>{booking.total}</b>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </>
+  );
+}
+
+function CreateListing({
+  listingTab,
+  listings,
+  setListingTab,
+}: {
+  listingTab: ListingTab;
+  listings: DashboardOverview["listings"];
+  setListingTab: (tab: ListingTab) => void;
+}) {
   const tabs: ListingTab[] = ["details", "pricing", "availability", "add-ons"];
   return (
     <>
@@ -295,11 +483,11 @@ function CreateListing({ listingTab, setListingTab }: { listingTab: ListingTab; 
         <Card className="form-panel">
           {listingTab === "details" && (
             <>
-              <FormRow label="Listing Name"><Input defaultValue="Morning Kayak Tour" placeholder="e.g. Morning Kayak Tour" /></FormRow>
+              <FormRow label="Listing Name"><Input defaultValue="Harbor Kayak Tour" placeholder="e.g. Harbor Kayak Tour" /></FormRow>
               <FormRow label="Type"><Select defaultValue="Tour"><option>Tour</option><option>Rental</option><option>Class</option><option>Event</option></Select></FormRow>
-              <FormRow label="Duration"><Select defaultValue="2 hours"><option>30 min</option><option>1 hour</option><option>2 hours</option><option>4 hours</option></Select></FormRow>
-              <FormRow label="Description"><Textarea defaultValue="A guided 2-hour morning kayak tour along the Pacific Coast. Suitable for beginners. All equipment provided." rows={4} /></FormRow>
-              <FormRow label="Meeting Point"><Input defaultValue="Main Beach Pier, Slip 4, Santa Cruz" /></FormRow>
+              <FormRow label="Duration"><Select defaultValue="1 hour"><option>30 min</option><option>1 hour</option><option>2 hours</option><option>4 hours</option></Select></FormRow>
+              <FormRow label="Description"><Textarea defaultValue="A one hour guided harbor paddle with beginner-friendly instruction and local shoreline highlights." rows={4} /></FormRow>
+              <FormRow label="Meeting Point"><Input defaultValue="100 Harbor Way, Santa Cruz, CA 95060" /></FormRow>
             </>
           )}
           {listingTab === "pricing" && (
@@ -307,14 +495,14 @@ function CreateListing({ listingTab, setListingTab }: { listingTab: ListingTab; 
               <FormRow label="Price per Adult"><Input defaultValue="$65.00" /></FormRow>
               <FormRow label="Price per Child (optional)"><Input defaultValue="$45.00" /></FormRow>
               <FormRow label="Min. guests"><Input defaultValue="1" /></FormRow>
-              <FormRow label="Max. guests"><Input defaultValue="8" /></FormRow>
+              <FormRow label="Max. guests"><Input defaultValue="12" /></FormRow>
             </>
           )}
-          {listingTab === "availability" && <MiniCalendar />}
+          {listingTab === "availability" && <MiniCalendar bookedDates={fallbackOverview.bookedDates} fullDates={fallbackOverview.fullDates} />}
           {listingTab === "add-ons" && <AddOnsPanel />}
         </Card>
         <aside className="create-preview">
-          <ListingCard listing={listings[0]!} />
+          <ListingCard listing={listings[0] ?? fallbackOverview.listings[0]!} />
           <EmptyState icon="◫" title="No bookings yet" body="Your listing isn't published. Publish to start receiving bookings." />
         </aside>
       </div>
@@ -329,10 +517,10 @@ function FormRow({ children, label }: { children: ReactNode; label: string }) {
 function AddOnsPanel() {
   return (
     <div className="addons-panel">
-      {["Wetsuit Rental", "Photo Package", "Private Guide"].map((name, index) => (
+      {["Adult", "Child", "Free Child"].map((name, index) => (
         <button className="addon-row" data-active={index === 0} key={name} type="button">
           <span className="addon-row__icon">◧</span>
-          <span><strong>{name}</strong><small>{index === 0 ? "Full suit included" : "Optional upgrade"}</small></span>
+          <span><strong>{name}</strong><small>{index === 0 ? "Ages 13+" : index === 1 ? "Ages 6 - 12" : "5 yrs and under"}</small></span>
           <b>+${addonPrices[index]}</b>
         </button>
       ))}
@@ -340,34 +528,34 @@ function AddOnsPanel() {
   );
 }
 
-function BookingDetail() {
+function BookingDetail({ booking, listing }: { booking: DashboardOverview["bookings"][number]; listing: DashboardOverview["listings"][number] }) {
   return (
     <div className="detail-grid">
       <div className="detail-stack">
         <Card>
           <h2 className="panel-title">Guest</h2>
-          <div className="guest-row"><span>LM</span><div><strong>Lena Marsh</strong><p>lena.marsh@gmail.com · +1 (555) 847-2291</p></div></div>
+          <div className="guest-row"><span>{booking.initials}</span><div><strong>{booking.name}</strong><p>Redacted customer contact · demo booking</p></div></div>
         </Card>
         <Card>
           <h2 className="panel-title">Experience</h2>
           <div className="info-grid">
             {[
-              ["Listing", "Morning Kayak Tour"],
-              ["Date & Time", "May 8, 2026 · 9:00 AM"],
-              ["Duration", "2 hours"],
-              ["Guests", "3 (2 adults, 1 child)"],
-              ["Add-ons", "Wetsuit ×3, Photos ×1"],
-              ["Meeting Point", "Main Beach Pier, Slip 4"],
+              ["Listing", booking.listing],
+              ["Date & Time", booking.date],
+              ["Duration", listing.type.split("·")[1]?.trim() ?? "1 hour"],
+              ["Guests", `${booking.guests} pax`],
+              ["Resource", "Kayak Seat · capacity 12"],
+              ["Meeting Point", "100 Harbor Way, Santa Cruz"],
             ].map(([k, v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}
           </div>
         </Card>
-        <Card><h2 className="panel-title">Guest Notes</h2><p className="note">"One child is 7 years old. Hoping for calm water conditions. First time kayaking for the group."</p></Card>
+        <Card><h2 className="panel-title">Guest Notes</h2><p className="note">Demo booking note: guests should arrive 15 minutes early and dress for weather.</p></Card>
       </div>
       <Card className="payment-panel" padded={false}>
         <div className="payment-panel__inner">
           <h2 className="panel-title">Payment</h2>
-          {[["2× Adult ($65)", "$130.00"], ["1× Child ($45)", "$45.00"], ["Wetsuit ×3", "$45.00"], ["Photos ×1", "$35.00"], ["Fee", "$5.50"]].map(([k, v]) => <div className="pay-row" key={k}><span>{k}</span><strong>{v}</strong></div>)}
-          <div className="pay-row pay-row--total"><span>Total</span><strong>$260.50</strong></div>
+          {[["Adult tickets", booking.total], ["Tax", "8.7% included"], ["Source", "Online"], ["Payment type", "Credit card"]].map(([k, v]) => <div className="pay-row" key={k}><span>{k}</span><strong>{v}</strong></div>)}
+          <div className="pay-row pay-row--total"><span>Total</span><strong>{booking.total}</strong></div>
         </div>
         <div className="payment-actions"><Button type="button">Send Reminder</Button><Button variant="danger" type="button">Cancel Booking</Button></div>
       </Card>
@@ -375,24 +563,24 @@ function BookingDetail() {
   );
 }
 
-function EmbedSetup() {
+function EmbedSetup({ businessName, listing }: { businessName: string; listing: DashboardOverview["listings"][number] }) {
   const [theme, setTheme] = useState("light");
   return (
     <div className="embed-grid">
       <div className="detail-stack">
-        <Card><h2 className="panel-title">Configuration</h2><FormRow label="Listing"><Select defaultValue="kayak"><option value="kayak">Morning Kayak Tour</option><option>Sunset Paddleboard</option></Select></FormRow><FormRow label="Theme"><div className="theme-picker">{["light", "dark", "auto"].map((t) => <button key={t} data-active={theme === t} onClick={() => setTheme(t)} type="button">{t}</button>)}</div></FormRow></Card>
-        <Card><h2 className="panel-title">Embed Code</h2><pre className="code-block">{`<script\n  src="https://cdn.availo.io/widget.js"\n  data-key="ak_live_oce_2a9f3b"\n  data-listing="kayak-morning-tour"\n  data-theme="${theme}"\n></script>`}</pre><Button type="button">Copy Code</Button></Card>
+        <Card><h2 className="panel-title">Configuration</h2><FormRow label="Listing"><Select defaultValue="boot-hill"><option value="boot-hill">{listing.title}</option><option>Family Bundle</option></Select></FormRow><FormRow label="Theme"><div className="theme-picker">{["light", "dark", "auto"].map((t) => <button key={t} data-active={theme === t} onClick={() => setTheme(t)} type="button">{t}</button>)}</div></FormRow></Card>
+        <Card><h2 className="panel-title">Embed Code</h2><pre className="code-block">{`<script\n  src="https://cdn.availo.io/widget.js"\n  data-key="ak_live_rdw_307016"\n  data-listing="boot-hill-tour"\n  data-theme="${theme}"\n></script>`}</pre><Button type="button">Copy Code</Button></Card>
       </div>
-      <div><div className="preview-label">Widget Preview</div><div className="widget-preview"><div className="browser-label">yourwebsite.com — embedded widget</div><BookingWidget /></div></div>
+      <div><div className="preview-label">Widget Preview</div><div className="widget-preview"><div className="browser-label">yourwebsite.com — embedded widget</div><BookingWidget businessName={businessName} listing={listing} /></div></div>
     </div>
   );
 }
 
-function BookingWidget() {
+function BookingWidget({ businessName, listing }: { businessName: string; listing: DashboardOverview["listings"][number] }) {
   return (
     <Card className="mock-widget" padded={false}>
-      <div className="mock-widget__head"><div><strong>Morning Kayak Tour</strong><span>Ocean Tours Co. · 2 hours · from $65</span></div><i /></div>
-      <div className="mock-widget__body"><p>Select Date</p><div className="chip-row">{[7, 8, 9, 12].map((d) => <span data-active={d === 8} key={d}>May {d}</span>)}</div><p>Time</p><div className="chip-row"><span>8:00 AM</span><span data-soft="true">9:00 AM</span><span>11:00 AM</span></div><Button type="button">Next: Guests →</Button></div>
+      <div className="mock-widget__head"><div><strong>{listing.title}</strong><span>{businessName} · 1 hour · from $28</span></div><i /></div>
+      <div className="mock-widget__body"><p>Select Date</p><div className="chip-row">{[5, 6, 7, 9].map((d) => <span data-active={d === 7} key={d}>May {d}</span>)}</div><p>Time</p><div className="chip-row"><span>9:30 AM</span><span data-soft="true">11:00 AM</span><span>12:30 PM</span></div><Button type="button">Next: Guests →</Button></div>
     </Card>
   );
 }

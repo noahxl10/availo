@@ -23,7 +23,7 @@ const stepContent: StepContent[] = [
   {
     title: "Tell us about your business",
     fields: [
-      { label: "Business Name", placeholder: "Ocean Tours Co.", value: "Ocean Tours Co." },
+      { label: "Business Name", placeholder: "Sample Tours Co.", value: "Sample Tours Co." },
       {
         label: "Business Type",
         options: ["Tour Operator", "Rental Shop", "Fitness Studio", "Event Venue", "Other"],
@@ -35,7 +35,7 @@ const stepContent: StepContent[] = [
   {
     title: "Add your first experience",
     fields: [
-      { label: "Experience Name", placeholder: "Morning Kayak Tour", value: "Morning Kayak Tour" },
+      { label: "Experience Name", placeholder: "Harbor Kayak Tour", value: "Harbor Kayak Tour" },
       { label: "Duration", options: ["30 min", "1 hour", "2 hours", "4 hours", "Full Day", "Custom"] },
       { label: "Price per guest", placeholder: "$0.00", value: "$65.00" },
       { label: "Max guests", placeholder: "12", value: "8" },
@@ -90,7 +90,7 @@ export function OnboardingScreen() {
                 <code>
                   {'<script src="https://cdn.availo.io/widget.js"\n'}
                   {'  data-key="ak_live_oce_2a9f3b"\n'}
-                  {'  data-listing="kayak-morning-tour"\n'}
+                  {'  data-listing="boot-hill-tour"\n'}
                   {"></script>"}
                 </code>
               </pre>

@@ -1,16 +1,16 @@
 (function () {
   const MOCK_LISTING = {
-    title: "Morning Kayak Tour",
-    business: "Ocean Tours Co.",
-    duration: "2 hours",
+    title: "Harbor Kayak Tour",
+    business: "Sample Tours Co.",
+    duration: "1 hour",
     basePrice: 65,
     childPrice: 45,
-    dates: [7, 8, 9, 12, 14, 15, 16, 19, 22, 23],
-    slots: ["8:00 AM", "9:00 AM", "11:00 AM", "2:00 PM", "4:00 PM"],
+    dates: [5, 6, 7, 9, 10, 11, 12, 13, 14, 15],
+    slots: ["9:30 AM", "11:00 AM", "12:30 PM", "2:00 PM", "3:30 PM", "5:00 PM"],
     addons: [
-      { id: "wetsuit", title: "Wetsuit Rental", description: "Thermal suit and booties", price: 15 },
-      { id: "photos", title: "Photo Package", description: "Guide-captured trip gallery", price: 35 },
-      { id: "private", title: "Private Guide", description: "Dedicated instructor for your group", price: 75 },
+      { id: "adult", title: "Adult", description: "Ages 13+", price: 65 },
+      { id: "child", title: "Child", description: "Ages 6 - 12", price: 45 },
+      { id: "free-child", title: "Free Child", description: "5 yrs and under", price: 0 },
     ],
   };
 

@@ -1,0 +1,316 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum BusinessStatus {
+  onboarding
+  active
+  suspended
+  archived
+}
+
+enum UserRole {
+  owner
+  admin
+  staff
+  viewer
+}
+
+enum UserStatus {
+  invited
+  active
+  disabled
+}
+
+enum ListingStatus {
+  draft
+  active
+  paused
+  archived
+}
+
+enum PricingType {
+  per_guest
+  per_booking
+  per_unit
+}
+
+enum BookingStatus {
+  pending_payment
+  confirmed
+  canceled
+  refunded
+  partially_refunded
+  failed
+}
+
+enum PaymentStatus {
+  unpaid
+  pending
+  paid
+  failed
+  refunded
+  partially_refunded
+}
+
+model User {
+  id           String     @id
+  businessId   String?    @map("business_id")
+  email        String?
+  phoneNumber  String?    @map("phone_number")
+  passwordHash String?    @map("password_hash")
+  role         UserRole   @default(owner)
+  status       UserStatus @default(active)
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  business  Business? @relation(fields: [businessId], references: [id])
+  sessions  Session[]
+  auditLogs AuditLog[]
+
+  @@unique([businessId, email])
+  @@unique([businessId, phoneNumber])
+  @@index([businessId, role])
+  @@map("users")
+}
+
+model Business {
+  id           String         @id
+  ownerUserId  String?        @map("owner_user_id")
+  name         String
+  slug         String         @unique
+  timezone     String         @default("America/Los_Angeles")
+  currency     String         @default("USD")
+  supportEmail String?        @map("support_email")
+  supportPhone String?        @map("support_phone")
+  addressJson  String?        @map("address_json")
+  status       BusinessStatus @default(onboarding)
+  taxRateBps   Int            @default(0) @map("tax_rate_bps")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  users        User[]
+  sessions     Session[]
+  listings     Listing[]
+  bookings     Booking[]
+  bookingHolds BookingHold[]
+  paymentEvents PaymentEvent[]
+  auditLogs    AuditLog[]
+
+  @@map("businesses")
+}
+
+model Session {
+  id               String    @id
+  userId           String    @map("user_id")
+  businessId        String    @map("business_id")
+  refreshTokenHash  String    @map("refresh_token_hash")
+  revokedAt         DateTime? @map("revoked_at")
+  expiresAt         DateTime  @map("expires_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  user     User     @relation(fields: [userId], references: [id])
+  business Business @relation(fields: [businessId], references: [id])
+
+  @@index([businessId])
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Listing {
+  id                 String        @id
+  businessId         String        @map("business_id")
+  title              String
+  description        String?
+  category           String?
+  status             ListingStatus @default(draft)
+  basePriceCents     Int           @map("base_price_cents")
+  childPriceCents    Int?          @map("child_price_cents")
+  currency           String        @default("USD")
+  pricingType        PricingType   @default(per_guest) @map("pricing_type")
+  durationMinutes    Int           @map("duration_minutes")
+  minGuests          Int           @default(1) @map("min_guests")
+  maxGuests          Int           @default(1) @map("max_guests")
+  capacity           Int
+  meetingPoint       String?       @map("meeting_point")
+  imageUrlsJson      String        @default("[]") @map("image_urls_json")
+  createdAt          DateTime      @default(now()) @map("created_at")
+  updatedAt          DateTime      @updatedAt @map("updated_at")
+
+  business     Business                @relation(fields: [businessId], references: [id])
+  rules        AvailabilityRule[]
+  exceptions   AvailabilityException[]
+  addOns       AddOn[]
+  bookings     Booking[]
+  bookingHolds BookingHold[]
+
+  @@index([businessId])
+  @@index([businessId, status])
+  @@map("listings")
+}
+
+model AvailabilityRule {
+  id                  String   @id
+  businessId          String   @map("business_id")
+  listingId           String   @map("listing_id")
+  dayOfWeek           Int      @map("day_of_week")
+  startTime           String   @map("start_time")
+  endTime             String   @map("end_time")
+  slotIntervalMinutes Int      @map("slot_interval_minutes")
+  capacity            Int
+  effectiveStartDate  String   @map("effective_start_date")
+  effectiveEndDate    String?  @map("effective_end_date")
+
+  listing Listing @relation(fields: [listingId], references: [id])
+
+  @@index([businessId])
+  @@index([listingId, dayOfWeek])
+  @@map("availability_rules")
+}
+
+model AvailabilityException {
+  id              String  @id
+  businessId      String  @map("business_id")
+  listingId       String  @map("listing_id")
+  date            String
+  isClosed        Boolean @default(false) @map("is_closed")
+  customStartTime String? @map("custom_start_time")
+  customEndTime   String? @map("custom_end_time")
+  customCapacity  Int?    @map("custom_capacity")
+  reason          String?
+
+  listing Listing @relation(fields: [listingId], references: [id])
+
+  @@unique([listingId, date])
+  @@index([businessId])
+  @@map("availability_exceptions")
+}
+
+model AddOn {
+  id          String        @id
+  businessId  String        @map("business_id")
+  listingId   String        @map("listing_id")
+  name        String
+  description String?
+  priceCents  Int           @map("price_cents")
+  pricingType PricingType   @map("pricing_type")
+  minQuantity Int           @default(0) @map("min_quantity")
+  maxQuantity Int           @default(10) @map("max_quantity")
+  status      ListingStatus @default(active)
+
+  listing       Listing        @relation(fields: [listingId], references: [id])
+  bookingAddOns BookingAddOn[]
+
+  @@index([businessId])
+  @@index([listingId, status])
+  @@map("add_ons")
+}
+
+model Booking {
+  id                    String        @id
+  businessId            String        @map("business_id")
+  listingId             String        @map("listing_id")
+  customerName          String        @map("customer_name")
+  customerEmail         String        @map("customer_email")
+  customerPhone         String?       @map("customer_phone")
+  bookingDate           String        @map("booking_date")
+  startTime             String        @map("start_time")
+  endTime               String        @map("end_time")
+  guestCount            Int           @map("guest_count")
+  adultCount            Int           @default(0) @map("adult_count")
+  childCount            Int           @default(0) @map("child_count")
+  status                BookingStatus @default(pending_payment)
+  paymentStatus         PaymentStatus @default(unpaid) @map("payment_status")
+  paymentReferenceId    String?       @map("payment_reference_id")
+  subtotalCents         Int           @map("subtotal_cents")
+  taxCents              Int           @map("tax_cents")
+  platformFeeCents      Int           @map("platform_fee_cents")
+  processorFeeCents     Int           @default(0) @map("processor_fee_cents")
+  totalCents            Int           @map("total_cents")
+  notes                 String?
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  business   Business       @relation(fields: [businessId], references: [id])
+  listing    Listing        @relation(fields: [listingId], references: [id])
+  addOns     BookingAddOn[]
+
+  @@index([businessId])
+  @@index([listingId, bookingDate, startTime, status])
+  @@index([bookingDate])
+  @@index([status])
+  @@index([paymentReferenceId])
+  @@map("bookings")
+}
+
+model BookingAddOn {
+  id          String @id
+  bookingId   String @map("booking_id")
+  addOnId     String @map("add_on_id")
+  quantity    Int
+  priceCents  Int    @map("price_cents")
+  totalCents  Int    @map("total_cents")
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+  addOn   AddOn   @relation(fields: [addOnId], references: [id])
+
+  @@index([bookingId])
+  @@map("booking_add_ons")
+}
+
+model BookingHold {
+  id            String   @id
+  businessId    String   @map("business_id")
+  listingId     String   @map("listing_id")
+  bookingDate   String   @map("booking_date")
+  startTime     String   @map("start_time")
+  guestCount    Int      @map("guest_count")
+  quoteJson     String   @map("quote_json")
+  expiresAt     DateTime @map("expires_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id])
+  listing  Listing  @relation(fields: [listingId], references: [id])
+
+  @@index([businessId])
+  @@index([listingId, bookingDate, startTime, expiresAt])
+  @@map("booking_holds")
+}
+
+model PaymentEvent {
+  id              String   @id
+  businessId      String   @map("business_id")
+  bookingId       String?  @map("booking_id")
+  provider        String
+  providerEventId String   @unique @map("provider_event_id")
+  eventType       String   @map("event_type")
+  payloadJson     String   @map("payload_json")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id])
+
+  @@index([businessId])
+  @@map("payment_events")
+}
+
+model AuditLog {
+  id          String   @id
+  businessId  String   @map("business_id")
+  userId      String?  @map("user_id")
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String?  @map("entity_id")
+  metadataJson String? @map("metadata_json")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  business Business @relation(fields: [businessId], references: [id])
+  user     User?    @relation(fields: [userId], references: [id])
+
+  @@index([businessId, createdAt])
+  @@map("audit_logs")
+}
