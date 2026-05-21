@@ -4,6 +4,9 @@ Availo is an open-source booking management platform for tours, activities, rent
 
 The project is early but already includes a working API, dashboard, booking widget assets, seed data, and a Prisma-backed booking model.
 
+
+![Availo platform screenshot](https://github.com/user-attachments/assets/76193e34-5cc4-438f-adc6-c945b0a5f218)
+
 ## What is included
 
 - NestJS API for businesses, listings, bookings, public availability, checkout, and payment confirmation flows.
