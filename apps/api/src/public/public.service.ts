@@ -60,7 +60,7 @@ export class PublicService {
   async availability(id: string, date: string) {
     const listing = await this.prisma.listing.findFirst({
       where: { id, status: "active" },
-      include: { rules: true, exceptions: true, bookings: { where: { bookingDate: date, status: "confirmed" } } }
+      include: { rules: true, exceptions: true, bookings: { where: { bookingDate: date, status: { in: ["confirmed", "pending_payment"] } } } }
     });
     if (!listing) throw new NotFoundException("Listing not found");
 
@@ -85,7 +85,7 @@ export class PublicService {
     const input = parse(quoteInput, body);
     const listing = await this.prisma.listing.findFirst({
       where: { id: input.listingId, status: "active" },
-      include: { business: true, addOns: true }
+      include: { business: true, addOns: { where: { status: "active" } } }
     });
     if (!listing) throw new NotFoundException("Listing not found");
     const guestCount = input.adults + input.children;
@@ -95,7 +95,7 @@ export class PublicService {
     const slot = availability.slots.find((item) => item.startTime === input.startTime);
     if (!slot || slot.capacityRemaining < guestCount) throw new BadRequestException("Selected slot is unavailable");
 
-    const subtotalCents = subtotal(listing, input);
+    const { subtotalCents, addOns } = subtotal(listing, input);
     const taxCents = Math.round(subtotalCents * (listing.business.taxRateBps / 10000));
     const feeCents = platformFeeCents(subtotalCents);
     const quote = {
@@ -109,7 +109,8 @@ export class PublicService {
       taxCents,
       platformFeeCents: feeCents,
       processorFeeCents: 0,
-      totalCents: subtotalCents + taxCents + feeCents
+      totalCents: subtotalCents + taxCents + feeCents,
+      addOns
     };
 
     const hold = await this.prisma.bookingHold.create({
@@ -120,7 +121,7 @@ export class PublicService {
         bookingDate: input.date,
         startTime: input.startTime,
         guestCount,
-        quoteJson: JSON.stringify({ ...quote, addOns: input.addOns }),
+        quoteJson: JSON.stringify(quote),
         expiresAt: new Date(Date.now() + 15 * 60 * 1000)
       }
     });
@@ -129,11 +130,50 @@ export class PublicService {
 
   async checkout(body: unknown) {
     const input = parse(checkoutInput, body);
+    const now = new Date();
     const hold = await this.prisma.bookingHold.findUnique({ where: { id: input.holdId } });
-    if (!hold || hold.expiresAt <= new Date()) throw new BadRequestException("Hold is invalid or expired");
-    const quote = JSON.parse(hold.quoteJson) as ReturnType<typeof JSON.parse>;
-    const listing = await this.prisma.listing.findUniqueOrThrow({ where: { id: hold.listingId } });
+    if (!hold || hold.expiresAt <= now) throw new BadRequestException("Hold is invalid or expired");
+    const quote = JSON.parse(hold.quoteJson) as {
+      listingId: string;
+      bookingDate: string;
+      startTime: string;
+      guestCount: number;
+      adultCount: number;
+      childCount: number;
+      subtotalCents: number;
+      taxCents: number;
+      platformFeeCents: number;
+      processorFeeCents: number;
+      totalCents: number;
+      addOns?: { id: string; quantity: number; priceCents: number; totalCents: number }[];
+    };
+    if (
+      quote.listingId !== input.listingId ||
+      quote.bookingDate !== input.date ||
+      quote.startTime !== input.startTime ||
+      quote.adultCount !== input.adults ||
+      quote.childCount !== input.children ||
+      JSON.stringify((quote.addOns ?? []).map((item) => ({ id: item.id, quantity: item.quantity }))) !== JSON.stringify(input.addOns)
+    ) {
+      throw new BadRequestException("Checkout input does not match the quoted hold");
+    }
+    const listing = await this.prisma.listing.findFirstOrThrow({ where: { id: hold.listingId, status: "active" } });
     const booking = await this.prisma.$transaction(async (tx) => {
+      const [heldGuestCount, bookedGuestCount, exception] = await Promise.all([
+        tx.bookingHold.aggregate({
+          where: { listingId: hold.listingId, bookingDate: hold.bookingDate, startTime: hold.startTime, id: { not: hold.id }, expiresAt: { gt: now } },
+          _sum: { guestCount: true }
+        }),
+        tx.booking.aggregate({
+          where: { listingId: hold.listingId, bookingDate: hold.bookingDate, startTime: hold.startTime, status: { in: ["confirmed", "pending_payment"] } },
+          _sum: { guestCount: true }
+        }),
+        tx.availabilityException.findUnique({ where: { listingId_date: { listingId: hold.listingId, date: hold.bookingDate } } })
+      ]);
+      const capacity = exception?.customCapacity ?? listing.capacity;
+      if (capacity - (heldGuestCount._sum.guestCount ?? 0) - (bookedGuestCount._sum.guestCount ?? 0) < hold.guestCount) {
+        throw new BadRequestException("Selected slot is unavailable");
+      }
       const created = await tx.booking.create({
         data: {
           id: prefixedId("bok"),
@@ -158,6 +198,19 @@ export class PublicService {
           totalCents: quote.totalCents
         }
       });
+      if (quote.addOns?.length) {
+        await tx.bookingAddOn.createMany({
+          data: quote.addOns.map((addOn) => ({
+            id: prefixedId("bad"),
+            bookingId: created.id,
+            addOnId: addOn.id,
+            quantity: addOn.quantity,
+            priceCents: addOn.priceCents,
+            totalCents: addOn.totalCents
+          }))
+        });
+      }
+      await tx.bookingHold.delete({ where: { id: hold.id } });
       await tx.auditLog.create({
         data: {
           id: prefixedId("aud"),
@@ -252,13 +305,21 @@ function addMinutes(time: string, increment: number) {
   return fromMinutes(minutes(time) + increment);
 }
 
-function subtotal(listing: { basePriceCents: number; childPriceCents: number | null; addOns: { id: string; priceCents: number; pricingType: string }[] }, input: z.infer<typeof quoteInput>) {
+function subtotal(
+  listing: { basePriceCents: number; childPriceCents: number | null; addOns: { id: string; priceCents: number; pricingType: string; minQuantity: number; maxQuantity: number }[] },
+  input: z.infer<typeof quoteInput>
+) {
   const guestSubtotal = input.adults * listing.basePriceCents + input.children * (listing.childPriceCents ?? listing.basePriceCents);
-  const addOnSubtotal = input.addOns.reduce((sum, selected) => {
+  const addOns = input.addOns.map((selected) => {
     const addOn = listing.addOns.find((item) => item.id === selected.id);
     if (!addOn) throw new BadRequestException(`Unknown add-on ${selected.id}`);
+    if (selected.quantity < addOn.minQuantity || selected.quantity > addOn.maxQuantity) {
+      throw new BadRequestException(`Quantity outside limits for add-on ${selected.id}`);
+    }
     const multiplier = addOn.pricingType === "per_guest" ? input.adults + input.children : 1;
-    return sum + addOn.priceCents * selected.quantity * multiplier;
-  }, 0);
-  return guestSubtotal + addOnSubtotal;
+    const totalCents = addOn.priceCents * selected.quantity * multiplier;
+    return { id: selected.id, quantity: selected.quantity, priceCents: addOn.priceCents, totalCents };
+  });
+  const addOnSubtotal = addOns.reduce((sum, addOn) => sum + addOn.totalCents, 0);
+  return { subtotalCents: guestSubtotal + addOnSubtotal, addOns };
 }

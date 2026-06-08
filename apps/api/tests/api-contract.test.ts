@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import argon2 from "argon2";
 import { AuthController } from "../src/auth/auth.controller.js";
-import { PublicService } from "../src/public/public.service.js";
-import { PaymentController } from "../src/payments/payment.controller.js";
+import { DEMO_BUSINESS_ID, DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
+import { prefixedId } from "../src/common/ids.js";
 import { DashboardService } from "../src/dashboard/dashboard.service.js";
-import { DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
+import { ListingService } from "../src/listings/listing.service.js";
+import { PaymentController } from "../src/payments/payment.controller.js";
+import { PublicService } from "../src/public/public.service.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
 
 describe("dashboard and public API contracts", () => {
@@ -12,6 +15,7 @@ describe("dashboard and public API contracts", () => {
   const dashboard = new DashboardService(prisma);
   const payments = new PaymentController(prisma);
   const publicApi = new PublicService(prisma);
+  const listingService = new ListingService(prisma);
 
   beforeAll(async () => {
     await prisma.$connect();
@@ -68,6 +72,16 @@ describe("dashboard and public API contracts", () => {
     expect(login.accessToken).toEqual(expect.any(String));
     expect(login.refreshToken).toEqual(expect.any(String));
 
+    await prisma.session.create({
+      data: {
+        id: prefixedId("ses"),
+        userId: "usr_demo_owner",
+        businessId: DEMO_BUSINESS_ID,
+        refreshTokenHash: await argon2.hash("not-the-presented-refresh-token"),
+        expiresAt: new Date(Date.now() + 60_000)
+      }
+    });
+
     const refresh = await auth.refresh({ refreshToken: login.refreshToken });
     expect(refresh.ok).toBe(true);
     if (!("refreshToken" in refresh)) throw new Error("Expected successful refresh");
@@ -79,7 +93,8 @@ describe("dashboard and public API contracts", () => {
     const logout = await auth.logout({ refreshToken: refresh.refreshToken });
     expect(logout.ok).toBe(true);
     const activeSessions = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } });
-    expect(activeSessions).toBe(0);
+    expect(activeSessions).toBe(1);
+    await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
   });
 
   it("creates a capacity hold and checkout keeps booking pending until payment confirmation", async () => {
@@ -106,6 +121,21 @@ describe("dashboard and public API contracts", () => {
     });
 
     expect(checkout.status).toBe("pending_payment");
+    await expect(
+      publicApi.checkout({
+        holdId: quote.holdId,
+        listingId: "lst_harbor_kayak_tour",
+        date: "2026-05-12",
+        startTime: "9:30 AM",
+        adults: 2,
+        children: 1,
+        addOns: [],
+        customer: { name: "API Tester", email: "tester@example.com" }
+      })
+    ).rejects.toThrow();
+
+    const availability = await publicApi.availability("lst_harbor_kayak_tour", "2026-05-12");
+    expect(availability.slots.find((slot) => slot.startTime === "9:30 AM")?.capacityRemaining).toBeLessThan(12);
 
     const confirmation = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
     expect(confirmation).toEqual({ ok: true, duplicate: false, bookingId: checkout.bookingId });
@@ -118,5 +148,9 @@ describe("dashboard and public API contracts", () => {
     await prisma.booking.deleteMany({ where: { customerEmail: "tester@example.com" } });
     await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
     await prisma.auditLog.deleteMany({ where: { entityId: checkout.bookingId } });
+  });
+
+  it("rejects listing updates that would invert guest limits", async () => {
+    await expect(listingService.update("lst_harbor_kayak_tour", { minGuests: 99 })).rejects.toThrow("minGuests cannot be greater than maxGuests");
   });
 });

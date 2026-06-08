@@ -47,12 +47,13 @@ export class AuthController {
   @Post("refresh")
   async refresh(@Body() body: { refreshToken?: string }) {
     if (!body.refreshToken) return { ok: false, error: "Missing refresh token" };
-    const session = await this.prisma.session.findFirst({ where: { revokedAt: null, expiresAt: { gt: new Date() } } });
-    if (!session || !(await argon2.verify(session.refreshTokenHash, body.refreshToken))) {
+    const sessions = await this.prisma.session.findMany({ where: { revokedAt: null, expiresAt: { gt: new Date() } } });
+    const session = await firstMatchingSession(sessions, body.refreshToken);
+    if (!session) {
       return { ok: false, error: "Invalid refresh token" };
     }
     await this.prisma.session.update({ where: { id: session.id }, data: { revokedAt: new Date() } });
-    return this.issue(session.userId, "");
+    return this.issue(session.userId);
   }
 
   @Post("logout")
@@ -73,8 +74,10 @@ export class AuthController {
     });
   }
 
-  private async issue(userId: string, email: string) {
-    const accessToken = jwt.sign({ sub: userId, businessId: DEMO_BUSINESS_ID, role: "owner" }, process.env.JWT_ACCESS_SECRET ?? "local-dev-access-secret", {
+  private async issue(userId: string, email?: string) {
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { email: true, businessId: true, role: true } });
+    const businessId = user.businessId ?? DEMO_BUSINESS_ID;
+    const accessToken = jwt.sign({ sub: userId, businessId, role: user.role }, process.env.JWT_ACCESS_SECRET ?? "local-dev-access-secret", {
       expiresIn: "15m"
     });
     const refreshToken = prefixedId("rt");
@@ -82,12 +85,12 @@ export class AuthController {
       data: {
         id: prefixedId("ses"),
         userId,
-        businessId: DEMO_BUSINESS_ID,
+        businessId,
         refreshTokenHash: await argon2.hash(refreshToken),
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
       }
     });
-    return { ok: true, user: { id: userId, email, businessId: DEMO_BUSINESS_ID, role: "owner" }, accessToken, refreshToken };
+    return { ok: true, user: { id: userId, email: email ?? user.email ?? "", businessId, role: user.role }, accessToken, refreshToken };
   }
 }
 

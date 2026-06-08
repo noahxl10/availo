@@ -74,8 +74,8 @@ export class ListingService {
   }
 
   async update(id: string, body: unknown) {
-    await this.get(id);
-    const input = cleanUndefined(this.parseUpdate(body));
+    const current = await this.get(id);
+    const input = cleanUndefined(this.parseUpdate(body, current));
     return this.prisma.$transaction(async (tx) => {
       const listing = await tx.listing.update({
         where: { id },
@@ -108,10 +108,12 @@ export class ListingService {
     return parsed.data;
   }
 
-  private parseUpdate(body: unknown) {
+  private parseUpdate(body: unknown, current: { minGuests: number; maxGuests: number }) {
     const parsed = listingInput.partial().safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
-    if (parsed.data.minGuests && parsed.data.maxGuests && parsed.data.minGuests > parsed.data.maxGuests) {
+    const nextMinGuests = parsed.data.minGuests ?? current.minGuests;
+    const nextMaxGuests = parsed.data.maxGuests ?? current.maxGuests;
+    if (nextMinGuests > nextMaxGuests) {
       throw new BadRequestException("minGuests cannot be greater than maxGuests");
     }
     return parsed.data;

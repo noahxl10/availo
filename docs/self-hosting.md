@@ -33,6 +33,8 @@ npm run dev
 
 The dashboard will be available at `http://localhost:3000` and the API at `http://localhost:4000`.
 
+After seeding, the dashboard shows the demo operator data served by the API. If the dashboard cannot reach `NEXT_PUBLIC_API_BASE_URL`, it displays bundled fallback data for development; fix the API URL or API process before treating the install as working.
+
 ## Configuration
 
 API variables live in `apps/api/.env`.
@@ -40,8 +42,8 @@ API variables live in `apps/api/.env`.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Prisma database URL. Defaults to `file:./dev.db` for SQLite. |
-| `JWT_ACCESS_SECRET` | Yes | Secret used to sign short-lived access tokens. |
-| `JWT_REFRESH_SECRET` | Yes | Reserved for refresh-token workflows. Use a different value from `JWT_ACCESS_SECRET`. |
+| `JWT_ACCESS_SECRET` | Yes | Secret used to sign short-lived access tokens. Use a long random value. |
+| `JWT_REFRESH_SECRET` | Reserved | Reserved for signed refresh-token workflows. Current refresh tokens are opaque database-backed credentials. |
 | `APP_BASE_URL` | Yes | Public dashboard URL. Also used as the default CORS origin. |
 | `API_BASE_URL` | Yes | Public API URL used for generated checkout links. |
 | `CORS_ORIGINS` | Recommended | Comma-separated list of dashboard origins allowed to call the API. |
@@ -64,6 +66,8 @@ npm run start:dashboard
 ```
 
 For production, run the API and dashboard as separate long-running services. Put both behind HTTPS and set the public URLs in `apps/api/.env` and `apps/dashboard/.env.local`.
+
+Do not deploy with `CORS_ORIGINS="*"`. The API uses credentialed CORS and rejects wildcard origins at startup.
 
 ## Database notes
 

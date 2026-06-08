@@ -40,6 +40,12 @@ npm run dev
 
 Open `http://localhost:3000`. The API runs on `http://localhost:4000`.
 
+### First-run behavior
+
+The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL`; if the API is unavailable it falls back to local mock data so UI work can continue, but that fallback is not proof that the API is healthy.
+
+The current admin experience is intentionally simple while Availo moves toward a full tenant-authenticated operator dashboard. Treat public availability, checkout capacity, sessions, CORS, and payment confirmation as the highest-risk areas when contributing.
+
 ## Self-hosting
 
 See [docs/self-hosting.md](docs/self-hosting.md) for production-oriented setup notes, environment variables, upgrade steps, and deployment guidance.
@@ -75,6 +81,10 @@ npm run start:dashboard
 Availo is pre-1.0. Expect rough edges, missing hardening, and changing APIs. It is suitable for experimentation, local pilots, and contributors who want to shape the self-hosted booking workflow.
 
 Before using it in production, review [SECURITY.md](SECURITY.md), replace all example secrets, put the services behind HTTPS, and verify payment flows for your environment.
+
+## Contributor context
+
+See [AGENTS.md](AGENTS.md) for the product direction, engineering expectations, security baseline, and common commands used by maintainers and coding agents.
 
 ## Contributing
 
