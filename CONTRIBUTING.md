@@ -14,11 +14,16 @@ Thanks for helping make Availo better. This project is early, so small, focused 
 
 ## Before opening a pull request
 
+- Install dependencies with `npm ci` so local verification uses the committed lockfile.
 - Run `npm run typecheck`.
 - Run `npm test`.
+- Run `npm run build`.
+- Run `npm run audit:production`. CI blocks unreviewed high and all critical production advisories; any temporary high-severity exception must be owned, justified, and time-limited in the security allowlist.
 - Keep changes scoped to one feature or fix.
 - Include screenshots for visible dashboard or widget changes.
 - Update the README or docs when behavior, setup, or configuration changes.
+
+Pull requests and pushes to `main` run the same install, Prisma migration/seed, typecheck, test, build, and high-severity production dependency audit in GitHub Actions. Do not merge a pull request while a required check is failing.
 
 ## Project direction
 
