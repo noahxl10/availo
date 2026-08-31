@@ -22,7 +22,7 @@ function apiPort() {
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.enableCors({
     origin: corsOrigins(),
     credentials: true

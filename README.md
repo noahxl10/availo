@@ -43,6 +43,8 @@ npm run dev
 
 Open `http://localhost:3000`. The API runs on `http://localhost:4000`.
 
+For local checkout demos, set `ALLOW_MOCK_PAYMENTS="true"` in `apps/api/.env`. Keep it false or unset outside local demo and test environments.
+
 ### First-run behavior
 
 The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL`; if the API is unavailable it falls back to local mock data so UI work can continue, but that fallback is not proof that the API is healthy.

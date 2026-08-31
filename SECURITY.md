@@ -18,8 +18,10 @@ Include:
 - Replace all example secrets in `apps/api/.env`.
 - Use HTTPS in front of both the dashboard and API.
 - Set `CORS_ORIGINS` to the exact dashboard origin.
+- Keep `ALLOW_MOCK_PAYMENTS` unset or false outside local demo and test environments.
 - Back up the database before upgrades.
 - Use Stripe webhook signature verification before accepting real payments.
+- Keep refunds disabled until an authenticated refund provider flow is configured.
 
 ## Dependency advisory exceptions
 

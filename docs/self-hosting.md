@@ -50,6 +50,7 @@ API variables live in `apps/api/.env`.
 | `PORT` | No | API port. Defaults to `4000`. |
 | `STRIPE_SECRET_KEY` | No | Stripe API key for future real payment flows. |
 | `STRIPE_WEBHOOK_SECRET` | No | Enables Stripe webhook signature requirements when set. |
+| `ALLOW_MOCK_PAYMENTS` | No | Local/demo-only opt-in for mock checkout confirmation. Never enable in production. |
 
 Dashboard variables live in `apps/dashboard/.env.local`.
 
@@ -68,6 +69,10 @@ npm run start:dashboard
 For production, run the API and dashboard as separate long-running services. Put both behind HTTPS and set the public URLs in `apps/api/.env` and `apps/dashboard/.env.local`.
 
 Do not deploy with `CORS_ORIGINS="*"`. The API uses credentialed CORS and rejects wildcard origins at startup.
+
+Mock checkout is intentionally local-only. Production checkout fails closed until a real payment provider is configured in code; setting Stripe webhook secrets verifies inbound Stripe events but does not create Stripe Checkout sessions by itself.
+
+Refund requests also fail closed until Availo has an authenticated refund provider flow.
 
 ## Database notes
 

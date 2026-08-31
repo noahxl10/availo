@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import argon2 from "argon2";
+import { createHmac } from "node:crypto";
 import { AuthController } from "../src/auth/auth.controller.js";
 import { DEMO_BUSINESS_ID, DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
 import { prefixedId } from "../src/common/ids.js";
@@ -98,31 +99,19 @@ describe("dashboard and public API contracts", () => {
   });
 
   it("creates a capacity hold and checkout keeps booking pending until payment confirmation", async () => {
-    const quote = await publicApi.quote({
-      listingId: "lst_harbor_kayak_tour",
-      date: "2026-05-12",
-      startTime: "9:30 AM",
-      adults: 2,
-      children: 1,
-      addOns: []
-    });
+    await withEnv({ ALLOW_MOCK_PAYMENTS: "true" }, async () => {
+      const quote = await publicApi.quote({
+        listingId: "lst_harbor_kayak_tour",
+        date: "2026-05-12",
+        startTime: "9:30 AM",
+        adults: 2,
+        children: 1,
+        addOns: []
+      });
 
-    expect(quote.quote.platformFeeCents).toBe(Math.round(quote.quote.subtotalCents * 0.06));
+      expect(quote.quote.platformFeeCents).toBe(Math.round(quote.quote.subtotalCents * 0.06));
 
-    const checkout = await publicApi.checkout({
-      holdId: quote.holdId,
-      listingId: "lst_harbor_kayak_tour",
-      date: "2026-05-12",
-      startTime: "9:30 AM",
-      adults: 2,
-      children: 1,
-      addOns: [],
-      customer: { name: "API Tester", email: "tester@example.com" }
-    });
-
-    expect(checkout.status).toBe("pending_payment");
-    await expect(
-      publicApi.checkout({
+      const checkout = await publicApi.checkout({
         holdId: quote.holdId,
         listingId: "lst_harbor_kayak_tour",
         date: "2026-05-12",
@@ -131,26 +120,236 @@ describe("dashboard and public API contracts", () => {
         children: 1,
         addOns: [],
         customer: { name: "API Tester", email: "tester@example.com" }
-      })
-    ).rejects.toThrow();
+      });
 
-    const availability = await publicApi.availability("lst_harbor_kayak_tour", "2026-05-12");
-    expect(availability.slots.find((slot) => slot.startTime === "9:30 AM")?.capacityRemaining).toBeLessThan(12);
+      try {
+        expect(checkout.status).toBe("pending_payment");
+        await expect(
+          publicApi.checkout({
+            holdId: quote.holdId,
+            listingId: "lst_harbor_kayak_tour",
+            date: "2026-05-12",
+            startTime: "9:30 AM",
+            adults: 2,
+            children: 1,
+            addOns: [],
+            customer: { name: "API Tester", email: "tester@example.com" }
+          })
+        ).rejects.toThrow();
 
-    const confirmation = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
-    expect(confirmation).toEqual({ ok: true, duplicate: false, bookingId: checkout.bookingId });
-    const duplicate = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
-    expect(duplicate).toEqual({ ok: true, duplicate: true, bookingId: checkout.bookingId });
-    const confirmed = await prisma.booking.findUniqueOrThrow({ where: { id: checkout.bookingId } });
+        const availability = await publicApi.availability("lst_harbor_kayak_tour", "2026-05-12");
+        expect(availability.slots.find((slot) => slot.startTime === "9:30 AM")?.capacityRemaining).toBeLessThan(12);
+
+        const confirmation = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
+        expect(confirmation).toEqual({ ok: true, duplicate: false, bookingId: checkout.bookingId });
+        const duplicate = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
+        expect(duplicate).toEqual({ ok: true, duplicate: true, bookingId: checkout.bookingId });
+        const confirmed = await prisma.booking.findUniqueOrThrow({ where: { id: checkout.bookingId } });
+        expect(confirmed.status).toBe("confirmed");
+      } finally {
+        await prisma.paymentEvent.deleteMany({ where: { bookingId: checkout.bookingId } });
+        await prisma.booking.deleteMany({ where: { customerEmail: "tester@example.com" } });
+        await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
+        await prisma.auditLog.deleteMany({ where: { entityId: checkout.bookingId } });
+      }
+    });
+  });
+
+  it("keeps mock payments disabled by default and in production", async () => {
+    const quote = await publicApi.quote({
+      listingId: "lst_harbor_kayak_tour",
+      date: "2026-05-13",
+      startTime: "9:30 AM",
+      adults: 1,
+      children: 0,
+      addOns: []
+    });
+
+    await withEnv({ ALLOW_MOCK_PAYMENTS: undefined, NODE_ENV: "production" }, async () => {
+      await expect(
+        publicApi.checkout({
+          holdId: quote.holdId,
+          listingId: "lst_harbor_kayak_tour",
+          date: "2026-05-13",
+          startTime: "9:30 AM",
+          adults: 1,
+          children: 0,
+          addOns: [],
+          customer: { name: "Production Tester", email: "prod-checkout@example.com" }
+        })
+      ).rejects.toThrow("Payment provider is not configured");
+    });
+
+    const booking = await createPendingBooking("prod-mock-blocked@example.com");
+    try {
+      await withEnv({ ALLOW_MOCK_PAYMENTS: undefined, NODE_ENV: "production" }, async () => {
+        await expect(payments.mockConfirm({ bookingId: booking.id, providerEventId: "evt_prod_mock_blocked" })).rejects.toThrow("Mock payments are disabled");
+      });
+      await withEnv({ ALLOW_MOCK_PAYMENTS: "true", NODE_ENV: "production" }, async () => {
+        await expect(payments.mockConfirm({ bookingId: booking.id, providerEventId: "evt_prod_mock_forced" })).rejects.toThrow("Mock payments are disabled");
+      });
+
+      const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(unchanged.status).toBe("pending_payment");
+      expect(unchanged.paymentStatus).toBe("pending");
+      expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(0);
+      expect(await prisma.auditLog.count({ where: { entityId: booking.id, action: "payment.confirmed" } })).toBe(0);
+    } finally {
+      await cleanupBooking(booking.id);
+      await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
+    }
+  });
+
+  it("verifies Stripe webhooks before confirming pending bookings", async () => {
+    const booking = await createPendingBooking("stripe-valid@example.com");
+    const body = stripeWebhookBody("evt_stripe_valid", "checkout.session.completed", booking.id, { payment_status: "paid" });
+
+    await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
+      const result = await payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "whsec_test_secret"), { rawBody: Buffer.from(body) });
+      expect(result).toEqual({ ok: true, duplicate: false, bookingId: booking.id });
+      const duplicate = await payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "whsec_test_secret"), { rawBody: Buffer.from(body) });
+      expect(duplicate).toEqual({ ok: true, duplicate: true, bookingId: booking.id });
+      const relatedBody = stripeWebhookBody("evt_stripe_related_success", "payment_intent.succeeded", booking.id);
+      const related = await payments.stripeWebhook(JSON.parse(relatedBody), stripeSignature(relatedBody, "whsec_test_secret"), { rawBody: Buffer.from(relatedBody) });
+      expect(related).toEqual({ ok: true, ignored: true, bookingId: booking.id });
+    });
+
+    const confirmed = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
     expect(confirmed.status).toBe("confirmed");
+    expect(confirmed.paymentStatus).toBe("paid");
 
-    await prisma.paymentEvent.deleteMany({ where: { bookingId: checkout.bookingId } });
-    await prisma.booking.deleteMany({ where: { customerEmail: "tester@example.com" } });
-    await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
-    await prisma.auditLog.deleteMany({ where: { entityId: checkout.bookingId } });
+    await cleanupBooking(booking.id);
+  });
+
+  it("rejects invalid Stripe signatures without mutating payment state", async () => {
+    const booking = await createPendingBooking("stripe-invalid@example.com");
+    const body = stripeWebhookBody("evt_stripe_invalid", "checkout.session.completed", booking.id);
+
+    try {
+      await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
+        await expect(payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "wrong_secret"), { rawBody: Buffer.from(body) })).rejects.toThrow(
+          "Invalid Stripe signature"
+        );
+      });
+
+      const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(unchanged.status).toBe("pending_payment");
+      expect(unchanged.paymentStatus).toBe("pending");
+      expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(0);
+    } finally {
+      await cleanupBooking(booking.id);
+    }
+  });
+
+  it("ignores unsupported Stripe events and refuses to resurrect settled bookings", async () => {
+    const ignoredBooking = await createPendingBooking("stripe-ignored@example.com");
+    const ignoredBody = stripeWebhookBody("evt_stripe_ignored", "payment_intent.created", ignoredBooking.id);
+    const unpaidCheckoutBody = stripeWebhookBody("evt_stripe_unpaid_checkout", "checkout.session.completed", ignoredBooking.id, { payment_status: "unpaid" });
+
+    await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
+      const result = await payments.stripeWebhook(JSON.parse(ignoredBody), stripeSignature(ignoredBody, "whsec_test_secret"), { rawBody: Buffer.from(ignoredBody) });
+      expect(result).toEqual({ ok: true, ignored: true });
+      const unpaidCheckout = await payments.stripeWebhook(JSON.parse(unpaidCheckoutBody), stripeSignature(unpaidCheckoutBody, "whsec_test_secret"), {
+        rawBody: Buffer.from(unpaidCheckoutBody)
+      });
+      expect(unpaidCheckout).toEqual({ ok: true, ignored: true });
+    });
+    const ignored = await prisma.booking.findUniqueOrThrow({ where: { id: ignoredBooking.id } });
+    expect(ignored.status).toBe("pending_payment");
+    expect(await prisma.paymentEvent.count({ where: { bookingId: ignoredBooking.id } })).toBe(0);
+
+    const canceledBooking = await createPendingBooking("stripe-canceled@example.com");
+    await prisma.booking.update({ where: { id: canceledBooking.id }, data: { status: "canceled", paymentStatus: "failed" } });
+    const canceledBody = stripeWebhookBody("evt_stripe_canceled", "payment_intent.succeeded", canceledBooking.id);
+    try {
+      await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
+        const result = await payments.stripeWebhook(JSON.parse(canceledBody), stripeSignature(canceledBody, "whsec_test_secret"), { rawBody: Buffer.from(canceledBody) });
+        expect(result).toEqual({ ok: true, ignored: true, bookingId: canceledBooking.id });
+      });
+      const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: canceledBooking.id } });
+      expect(unchanged.status).toBe("canceled");
+      expect(unchanged.paymentStatus).toBe("failed");
+      expect(await prisma.paymentEvent.count({ where: { bookingId: canceledBooking.id } })).toBe(0);
+    } finally {
+      await cleanupBooking(ignoredBooking.id);
+      await cleanupBooking(canceledBooking.id);
+    }
+  });
+
+  it("fails closed for refunds until an authenticated refund provider is configured", async () => {
+    const booking = await createPendingBooking("refund-disabled@example.com");
+    try {
+      await expect(payments.refund(booking.id)).rejects.toThrow("Refunds are not configured");
+      const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(unchanged.status).toBe("pending_payment");
+      expect(unchanged.paymentStatus).toBe("pending");
+      expect(await prisma.auditLog.count({ where: { entityId: booking.id, action: "booking.refunded" } })).toBe(0);
+    } finally {
+      await cleanupBooking(booking.id);
+    }
   });
 
   it("rejects listing updates that would invert guest limits", async () => {
     await expect(listingService.update("lst_harbor_kayak_tour", { minGuests: 99 })).rejects.toThrow("minGuests cannot be greater than maxGuests");
   });
+
+  async function createPendingBooking(customerEmail: string) {
+    return prisma.booking.create({
+      data: {
+        id: prefixedId("bok"),
+        businessId: DEMO_BUSINESS_ID,
+        listingId: "lst_harbor_kayak_tour",
+        customerName: "Payment Tester",
+        customerEmail,
+        bookingDate: "2026-05-14",
+        startTime: "11:00 AM",
+        endTime: "12:00 PM",
+        guestCount: 1,
+        adultCount: 1,
+        childCount: 0,
+        status: "pending_payment",
+        paymentStatus: "pending",
+        paymentReferenceId: prefixedId("payref"),
+        subtotalCents: 6500,
+        taxCents: 553,
+        platformFeeCents: 390,
+        totalCents: 7443
+      }
+    });
+  }
+
+  async function cleanupBooking(bookingId: string) {
+    await prisma.paymentEvent.deleteMany({ where: { bookingId } });
+    await prisma.auditLog.deleteMany({ where: { entityId: bookingId } });
+    await prisma.booking.deleteMany({ where: { id: bookingId } });
+  }
+
+  async function withEnv<T>(values: Record<string, string | undefined>, callback: () => Promise<T>) {
+    const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    try {
+      return await callback();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  function stripeWebhookBody(eventId: string, eventType: string, bookingId: string, objectFields: Record<string, string> = {}) {
+    return JSON.stringify({
+      id: eventId,
+      type: eventType,
+      data: { object: { ...objectFields, metadata: { bookingId } } }
+    });
+  }
+
+  function stripeSignature(body: string, secret: string, timestamp = Math.floor(Date.now() / 1000)) {
+    const digest = createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
+    return `t=${timestamp},v1=${digest}`;
+  }
 });

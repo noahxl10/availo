@@ -2,6 +2,7 @@ import { BadRequestException, Inject, Injectable, NotFoundException } from "@nes
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { platformFeeCents } from "../common/money.js";
+import { assertPaymentProviderConfigured } from "../payments/payment-config.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const quoteInput = z.object({
@@ -130,6 +131,7 @@ export class PublicService {
 
   async checkout(body: unknown) {
     const input = parse(checkoutInput, body);
+    assertPaymentProviderConfigured();
     const now = new Date();
     const hold = await this.prisma.bookingHold.findUnique({ where: { id: input.holdId } });
     if (!hold || hold.expiresAt <= now) throw new BadRequestException("Hold is invalid or expired");

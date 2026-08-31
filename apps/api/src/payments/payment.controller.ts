@@ -1,21 +1,12 @@
-import { BadRequestException, Body, Controller, Headers, Inject, Param, Post } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Headers, Inject, Param, Post, Req, ServiceUnavailableException } from "@nestjs/common";
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { assertMockPaymentsEnabled, verifyStripeWebhook } from "./payment-config.js";
 
 const confirmInput = z.object({
   bookingId: z.string().min(1),
   providerEventId: z.string().min(1).default(() => prefixedId("evt"))
-});
-
-const stripeEventInput = z.object({
-  id: z.string().min(1),
-  type: z.string().min(1),
-  data: z.object({
-    object: z.object({
-      metadata: z.object({ bookingId: z.string().min(1) }).optional()
-    })
-  })
 });
 
 @Controller()
@@ -24,44 +15,38 @@ export class PaymentController {
 
   @Post("payments/mock/confirm")
   async mockConfirm(@Body() body: unknown) {
+    assertMockPaymentsEnabled();
     const input = confirmInput.parse(body);
     return this.confirmBooking(input.bookingId, "mock", input.providerEventId, "payment.confirmed", body);
   }
 
   @Post("payments/stripe/webhook")
-  async stripeWebhook(@Body() body: unknown, @Headers("stripe-signature") signature?: string) {
-    if ((process.env.STRIPE_WEBHOOK_SECRET ?? "") && !signature) throw new BadRequestException("Missing Stripe signature");
-    const event = stripeEventInput.parse(body);
-    const bookingId = event.data.object.metadata?.bookingId;
-    if (!bookingId) throw new BadRequestException("Missing booking metadata");
-    return this.confirmBooking(bookingId, "stripe", event.id, event.type, body);
+  async stripeWebhook(@Body() body: unknown, @Headers("stripe-signature") signature: string | undefined, @Req() request: { rawBody?: Buffer }) {
+    const event = verifyStripeWebhook(body, request.rawBody, signature);
+    if (!event) return { ok: true, ignored: true };
+    return this.confirmBooking(event.data.object.metadata!.bookingId, "stripe", event.id, event.type, body);
   }
 
   @Post("bookings/:id/refund")
   async refund(@Param("id") id: string) {
-    const booking = await this.prisma.booking.findUniqueOrThrow({ where: { id } });
-    const refunded = await this.prisma.booking.update({
-      where: { id },
-      data: { status: "refunded", paymentStatus: "refunded" }
-    });
-    await this.prisma.auditLog.create({
-      data: {
-        id: prefixedId("aud"),
-        businessId: booking.businessId,
-        action: "booking.refunded",
-        entityType: "booking",
-        entityId: booking.id
-      }
-    });
-    return refunded;
+    throw new ServiceUnavailableException(`Refunds are not configured for booking ${id}`);
   }
 
   private async confirmBooking(bookingId: string, provider: string, providerEventId: string, eventType: string, payload: unknown) {
-    const booking = await this.prisma.booking.findUniqueOrThrow({ where: { id: bookingId } });
-    const existing = await this.prisma.paymentEvent.findUnique({ where: { providerEventId } });
-    if (existing) return { ok: true, duplicate: true, bookingId };
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.paymentEvent.findUnique({ where: { providerEventId } });
+      if (existing) return { ok: true, duplicate: true, bookingId };
 
-    await this.prisma.$transaction(async (tx) => {
+      const booking = await tx.booking.findUniqueOrThrow({ where: { id: bookingId } });
+      const updated = await tx.booking.updateMany({
+        where: { id: bookingId, status: "pending_payment", paymentStatus: "pending" },
+        data: { status: "confirmed", paymentStatus: "paid" }
+      });
+      if (updated.count !== 1) {
+        if (provider === "stripe") return { ok: true, ignored: true, bookingId };
+        throw new BadRequestException("Booking is not awaiting payment");
+      }
+
       await tx.paymentEvent.create({
         data: {
           id: prefixedId("payevt"),
@@ -73,10 +58,6 @@ export class PaymentController {
           payloadJson: JSON.stringify(payload)
         }
       });
-      await tx.booking.update({
-        where: { id: bookingId },
-        data: { status: "confirmed", paymentStatus: "paid" }
-      });
       await tx.auditLog.create({
         data: {
           id: prefixedId("aud"),
@@ -87,7 +68,7 @@ export class PaymentController {
           metadataJson: JSON.stringify({ provider, providerEventId })
         }
       });
+      return { ok: true, duplicate: false, bookingId };
     });
-    return { ok: true, duplicate: false, bookingId };
   }
 }
