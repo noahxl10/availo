@@ -250,6 +250,7 @@ function booking(
     status,
     paymentStatus: status === "confirmed" ? "paid" : "pending",
     paymentReferenceId: `seed_${id}`,
+    paymentExpiresAt: status === "pending_payment" ? new Date(Date.now() + 15 * 60 * 1000) : null,
     subtotalCents,
     taxCents: totalCents - subtotalCents,
     platformFeeCents: 0,

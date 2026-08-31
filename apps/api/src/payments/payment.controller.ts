@@ -1,4 +1,5 @@
 import { BadRequestException, Body, Controller, Headers, Inject, Param, Post, Req, ServiceUnavailableException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { PrismaService } from "../prisma/prisma.service.js";
@@ -39,11 +40,14 @@ export class PaymentController {
 
       const booking = await tx.booking.findUniqueOrThrow({ where: { id: bookingId } });
       const updated = await tx.booking.updateMany({
-        where: { id: bookingId, status: "pending_payment", paymentStatus: "pending" },
+        where: { id: bookingId, status: "pending_payment", paymentStatus: "pending", paymentExpiresAt: { gt: new Date() } },
         data: { status: "confirmed", paymentStatus: "paid" }
       });
       if (updated.count !== 1) {
-        if (provider === "stripe") return { ok: true, ignored: true, bookingId };
+        if (provider === "stripe") {
+          await this.recordIgnoredPayment(tx, booking, provider, providerEventId, eventType, payload);
+          return { ok: true, ignored: true, bookingId };
+        }
         throw new BadRequestException("Booking is not awaiting payment");
       }
 
@@ -69,6 +73,37 @@ export class PaymentController {
         }
       });
       return { ok: true, duplicate: false, bookingId };
+    });
+  }
+
+  private async recordIgnoredPayment(
+    tx: Prisma.TransactionClient,
+    booking: { id: string; businessId: string },
+    provider: string,
+    providerEventId: string,
+    eventType: string,
+    payload: unknown
+  ) {
+    await tx.paymentEvent.create({
+      data: {
+        id: prefixedId("payevt"),
+        businessId: booking.businessId,
+        bookingId: booking.id,
+        provider,
+        providerEventId,
+        eventType,
+        payloadJson: JSON.stringify(payload)
+      }
+    });
+    await tx.auditLog.create({
+      data: {
+        id: prefixedId("aud"),
+        businessId: booking.businessId,
+        action: "payment.ignored",
+        entityType: "booking",
+        entityId: booking.id,
+        metadataJson: JSON.stringify({ provider, providerEventId, reason: "booking_not_awaiting_payment" })
+      }
     });
   }
 }

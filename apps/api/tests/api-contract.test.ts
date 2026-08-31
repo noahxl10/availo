@@ -61,6 +61,7 @@ describe("dashboard and public API contracts", () => {
     );
     expect(response.business).not.toHaveProperty("ownerUserId");
     expect(response.business).not.toHaveProperty("taxRateBps");
+    expect(response.listings[0]).not.toHaveProperty("businessId");
     expect(response.listings[0]).not.toHaveProperty("internalNotes");
   });
 
@@ -212,6 +213,7 @@ describe("dashboard and public API contracts", () => {
       const relatedBody = stripeWebhookBody("evt_stripe_related_success", "payment_intent.succeeded", booking.id);
       const related = await payments.stripeWebhook(JSON.parse(relatedBody), stripeSignature(relatedBody, "whsec_test_secret"), { rawBody: Buffer.from(relatedBody) });
       expect(related).toEqual({ ok: true, ignored: true, bookingId: booking.id });
+      expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(2);
     });
 
     const confirmed = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
@@ -269,10 +271,32 @@ describe("dashboard and public API contracts", () => {
       const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: canceledBooking.id } });
       expect(unchanged.status).toBe("canceled");
       expect(unchanged.paymentStatus).toBe("failed");
-      expect(await prisma.paymentEvent.count({ where: { bookingId: canceledBooking.id } })).toBe(0);
+      expect(await prisma.paymentEvent.count({ where: { bookingId: canceledBooking.id } })).toBe(1);
+      expect(await prisma.auditLog.count({ where: { entityId: canceledBooking.id, action: "payment.ignored" } })).toBe(1);
     } finally {
       await cleanupBooking(ignoredBooking.id);
       await cleanupBooking(canceledBooking.id);
+    }
+  });
+
+  it("records verified Stripe payments received after pending payment expiry", async () => {
+    const booking = await createPendingBooking("stripe-expired@example.com");
+    await prisma.booking.update({ where: { id: booking.id }, data: { paymentExpiresAt: new Date(Date.now() - 60_000) } });
+    const body = stripeWebhookBody("evt_stripe_expired", "payment_intent.succeeded", booking.id);
+
+    try {
+      await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
+        const result = await payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "whsec_test_secret"), { rawBody: Buffer.from(body) });
+        expect(result).toEqual({ ok: true, ignored: true, bookingId: booking.id });
+      });
+
+      const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(unchanged.status).toBe("pending_payment");
+      expect(unchanged.paymentStatus).toBe("pending");
+      expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(1);
+      expect(await prisma.auditLog.count({ where: { entityId: booking.id, action: "payment.ignored" } })).toBe(1);
+    } finally {
+      await cleanupBooking(booking.id);
     }
   });
 
@@ -310,6 +334,7 @@ describe("dashboard and public API contracts", () => {
         status: "pending_payment",
         paymentStatus: "pending",
         paymentReferenceId: prefixedId("payref"),
+        paymentExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
         subtotalCents: 6500,
         taxCents: 553,
         platformFeeCents: 390,
