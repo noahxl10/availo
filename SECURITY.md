@@ -20,3 +20,7 @@ Include:
 - Set `CORS_ORIGINS` to the exact dashboard origin.
 - Back up the database before upgrades.
 - Use Stripe webhook signature verification before accepting real payments.
+
+## Dependency advisory exceptions
+
+CI blocks high and critical dependency advisories unless a high-severity advisory has a documented, time-limited exception in [`security/npm-audit-allowlist.json`](security/npm-audit-allowlist.json). Critical advisories cannot be excepted. Every exception records an owner, expiry date, and risk rationale; expired or newly discovered advisories fail the build.
