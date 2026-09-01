@@ -49,6 +49,7 @@ API variables live in `apps/api/.env`.
 | `CORS_ORIGINS` | Recommended | Comma-separated list of dashboard origins allowed to call the API. |
 | `PORT` | No | API port. Defaults to `4000`. |
 | `API_BODY_LIMIT` | No | Maximum parsed JSON and URL-encoded request body size. Defaults to `256kb`. |
+| `EXPIRED_RESERVATION_CLEANUP_BATCH_SIZE` | No | Maximum expired holds and pending-payment bookings processed per cleanup run. Defaults to `500`. |
 | `PUBLIC_QUOTE_RATE_LIMIT` | No | Public quote attempts per client IP per window. Defaults to `6`; set `0` only as an emergency rollback to disable the limiter. |
 | `PUBLIC_QUOTE_RATE_WINDOW_SECONDS` | No | Public quote rate-limit window. Defaults to `900`, aligned with the 15-minute hold TTL. |
 | `PUBLIC_RATE_LIMIT_MAX_KEYS` | No | Maximum active in-memory client buckets for public rate limits. Defaults to `10000`. |
@@ -87,6 +88,16 @@ Refund requests also fail closed until Availo has an authenticated refund provid
 SQLite is the current default and works well for evaluation and small installs. Keep the `apps/api/prisma/dev.db` file on persistent storage and back it up before pulling updates.
 
 The Prisma schema is in `apps/api/prisma/schema.prisma`. If you switch providers, update the datasource and create new migrations before deploying.
+
+## Expired reservation cleanup
+
+Availo ignores expired holds and expired pending payments when calculating capacity, even before cleanup runs. To keep storage and booking state tidy, schedule:
+
+```sh
+npm run cleanup:expired-reservations
+```
+
+Each run deletes at most `EXPIRED_RESERVATION_CLEANUP_BATCH_SIZE` expired quote holds and marks at most that many expired pending-payment bookings as failed with an audit entry. Run it every few minutes on a small host; increase the batch size only after observing database write latency.
 
 ## Upgrades
 

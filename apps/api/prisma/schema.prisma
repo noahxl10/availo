@@ -245,6 +245,7 @@ model Booking {
   @@index([listingId, bookingDate, startTime, status])
   @@index([bookingDate])
   @@index([status])
+  @@index([status, paymentStatus, paymentExpiresAt, id])
   @@index([paymentReferenceId])
   @@map("bookings")
 }
@@ -279,6 +280,7 @@ model BookingHold {
   listing  Listing  @relation(fields: [listingId], references: [id])
 
   @@index([businessId])
+  @@index([expiresAt, id])
   @@index([listingId, bookingDate, startTime, expiresAt])
   @@map("booking_holds")
 }

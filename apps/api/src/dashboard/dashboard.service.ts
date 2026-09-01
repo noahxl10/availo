@@ -11,13 +11,13 @@ const statusMap: Record<ListingStatus, "active" | "draft" | "pending"> = {
   archived: "pending"
 };
 
-const bookingStatusMap: Record<BookingStatus, "confirmed" | "pending"> = {
+const bookingStatusMap: Record<BookingStatus, "confirmed" | "pending" | "cancelled"> = {
   confirmed: "confirmed",
   pending_payment: "pending",
-  canceled: "pending",
-  refunded: "pending",
-  partially_refunded: "pending",
-  failed: "pending"
+  canceled: "cancelled",
+  refunded: "cancelled",
+  partially_refunded: "cancelled",
+  failed: "cancelled"
 };
 
 @Injectable()
