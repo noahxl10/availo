@@ -74,7 +74,7 @@ describe("quote hold capacity lifecycle", () => {
         _sum: { guestCount: true }
       });
       expect(activeHolds._sum.guestCount).toBe(2);
-      expect(await prisma.bookingHold.count({ where: { listingId: fixture.listingId } })).toBe(2);
+      expect(await prisma.bookingHold.count({ where: { id: quote.holdId } })).toBe(1);
     } finally {
       await cleanupListingFixture(fixture.listingId);
     }
@@ -83,7 +83,7 @@ describe("quote hold capacity lifecycle", () => {
   it("consumes an unexpired hold at checkout and releases expired pending payments from availability", async () => {
     const fixture = await createListingFixture({ capacity: 2 });
 
-    await withEnv({ ALLOW_MOCK_PAYMENTS: "true" }, async () => {
+    await withEnv({ ALLOW_MOCK_PAYMENTS: "true", STRIPE_SECRET_KEY: undefined }, async () => {
       const quote = await quoteExactCapacity(publicApi, fixture);
       const checkout = await publicApi.checkout({
         holdId: quote.holdId,
@@ -116,7 +116,7 @@ describe("quote hold capacity lifecycle", () => {
   it("revalidates rule capacity before consuming a hold at checkout", async () => {
     const fixture = await createListingFixture({ capacity: 2 });
 
-    await withEnv({ ALLOW_MOCK_PAYMENTS: "true" }, async () => {
+    await withEnv({ ALLOW_MOCK_PAYMENTS: "true", STRIPE_SECRET_KEY: undefined }, async () => {
       const quote = await quoteExactCapacity(publicApi, fixture);
       await prisma.availabilityRule.updateMany({ where: { listingId: fixture.listingId }, data: { capacity: 1 } });
 
@@ -266,7 +266,7 @@ describe("quote hold capacity lifecycle", () => {
       }
     });
 
-    await withEnv({ ALLOW_MOCK_PAYMENTS: "true" }, async () => {
+    await withEnv({ ALLOW_MOCK_PAYMENTS: "true", STRIPE_SECRET_KEY: undefined }, async () => {
       try {
         await expect(
           publicApi.checkout({

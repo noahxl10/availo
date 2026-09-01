@@ -1,10 +1,13 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { prefixedId } from "../common/ids.js";
+import { stripeConfigured, STRIPE_WEBHOOK_GRACE_MS } from "../payments/payment-config.js";
+import { StripeCheckoutClient } from "../payments/stripe-checkout.js";
 
 const DEFAULT_BATCH_SIZE = 500;
 const CLEANUP_RETRY_LIMIT = 3;
 
-type CleanupPrisma = Pick<PrismaClient, "$transaction" | "booking" | "bookingHold">;
+type CleanupPrisma = Pick<PrismaClient, "$transaction" | "booking" | "bookingHold" | "auditLog">;
+type CheckoutSessionExpirer = Pick<StripeCheckoutClient, "expireCheckoutSession">;
 
 export type ExpiredReservationCleanupResult = {
   expiredHoldsDeleted: number;
@@ -13,14 +16,15 @@ export type ExpiredReservationCleanupResult = {
 
 export async function cleanupExpiredReservations(
   prisma: CleanupPrisma,
-  options: { now?: Date; batchSize?: number; bookingBatchSize?: number; holdBatchSize?: number } = {}
+  options: { now?: Date; batchSize?: number; bookingBatchSize?: number; holdBatchSize?: number; checkoutSessionExpirer?: CheckoutSessionExpirer } = {}
 ): Promise<ExpiredReservationCleanupResult> {
   const now = options.now ?? new Date();
   const defaultBatchSize = options.batchSize ?? expiredReservationCleanupBatchSize();
   const bookingBatchSize = options.bookingBatchSize ?? defaultBatchSize;
   const holdBatchSize = options.holdBatchSize ?? defaultBatchSize;
+  const stripeSessionsToExpire: { businessId: string; bookingId: string; sessionId: string }[] = [];
 
-  return retryCleanupTransaction(() => prisma.$transaction(async (tx) => {
+  const result = await retryCleanupTransaction(() => prisma.$transaction(async (tx) => {
     const expiredHolds = await tx.bookingHold.findMany({
       where: { expiresAt: { lte: now } },
       select: { id: true },
@@ -32,9 +36,13 @@ export async function cleanupExpiredReservations(
       where: {
         status: "pending_payment",
         paymentStatus: "pending",
-        paymentExpiresAt: { lte: now }
+        OR: [
+          { paymentProvider: { not: "stripe" }, paymentExpiresAt: { lte: now } },
+          { paymentProvider: null, paymentExpiresAt: { lte: now } },
+          { paymentProvider: "stripe", paymentExpiresAt: { lte: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS) } }
+        ]
       },
-      select: { id: true, businessId: true, paymentExpiresAt: true },
+      select: { id: true, businessId: true, paymentProvider: true, paymentReferenceId: true, paymentExpiresAt: true },
       orderBy: [{ paymentExpiresAt: "asc" }, { id: "asc" }],
       take: bookingBatchSize
     });
@@ -52,12 +60,19 @@ export async function cleanupExpiredReservations(
             id: booking.id,
             status: "pending_payment",
             paymentStatus: "pending",
-            paymentExpiresAt: { lte: now }
+            OR: [
+              { paymentProvider: { not: "stripe" }, paymentExpiresAt: { lte: now } },
+              { paymentProvider: null, paymentExpiresAt: { lte: now } },
+              { paymentProvider: "stripe", paymentExpiresAt: { lte: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS) } }
+            ]
           },
           data: { status: "failed", paymentStatus: "failed" }
       });
       if (updated.count !== 1) continue;
       expiredBookingsFailed += 1;
+      if (booking.paymentProvider === "stripe" && booking.paymentReferenceId) {
+        stripeSessionsToExpire.push({ businessId: booking.businessId, bookingId: booking.id, sessionId: booking.paymentReferenceId });
+      }
       await tx.auditLog.create({
         data: {
           id: prefixedId("aud"),
@@ -75,6 +90,13 @@ export async function cleanupExpiredReservations(
       expiredBookingsFailed
     };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }));
+
+  const expirer = options.checkoutSessionExpirer ?? defaultCheckoutSessionExpirer();
+  if (expirer) {
+    await expireCheckoutSessions(prisma, expirer, stripeSessionsToExpire);
+  }
+
+  return result;
 }
 
 export function expiredReservationCleanupBatchSize() {
@@ -102,4 +124,27 @@ function isRetryableCleanupError(error: unknown) {
   if (error instanceof Prisma.PrismaClientKnownRequestError && new Set(["P2034", "P2028"]).has(error.code)) return true;
   const message = error instanceof Error ? error.message : "";
   return /write conflict|deadlock|database is locked|SQLITE_BUSY|Transaction already closed/i.test(message);
+}
+
+function defaultCheckoutSessionExpirer(): CheckoutSessionExpirer | null {
+  return stripeConfigured() ? new StripeCheckoutClient() : null;
+}
+
+async function expireCheckoutSessions(prisma: CleanupPrisma, expirer: CheckoutSessionExpirer, sessions: { businessId: string; bookingId: string; sessionId: string }[]) {
+  for (const session of sessions) {
+    try {
+      await expirer.expireCheckoutSession(session.sessionId);
+    } catch {
+      await prisma.auditLog.create({
+        data: {
+          id: prefixedId("aud"),
+          businessId: session.businessId,
+          action: "payment.checkout_session_expire_failed",
+          entityType: "booking",
+          entityId: session.bookingId,
+          metadataJson: JSON.stringify({ provider: "stripe", checkoutSessionId: session.sessionId })
+        }
+      });
+    }
+  }
 }

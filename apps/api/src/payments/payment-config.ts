@@ -1,9 +1,9 @@
 import { BadRequestException, ForbiddenException, ServiceUnavailableException } from "@nestjs/common";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import Stripe from "stripe";
 import { z } from "zod";
 
-const STRIPE_TOLERANCE_SECONDS = 5 * 60;
 const SUCCESSFUL_STRIPE_EVENTS = new Set(["checkout.session.completed", "payment_intent.succeeded"]);
+export const STRIPE_WEBHOOK_GRACE_MS = 10 * 60 * 1000;
 
 export function mockPaymentsEnabled() {
   return process.env.ALLOW_MOCK_PAYMENTS === "true" && process.env.NODE_ENV !== "production";
@@ -15,32 +15,47 @@ export function assertMockPaymentsEnabled() {
   }
 }
 
-export function assertPaymentProviderConfigured() {
-  if (mockPaymentsEnabled()) return;
+export function stripeConfigured() {
+  return Boolean(process.env.STRIPE_SECRET_KEY);
+}
+
+export function stripeWebhookConfigured() {
+  return Boolean(process.env.STRIPE_WEBHOOK_SECRET);
+}
+
+export function stripeSecret() {
+  const secret = process.env.STRIPE_SECRET_KEY;
+  if (!secret) throw new ServiceUnavailableException("Stripe Checkout is not configured");
+  return secret;
+}
+
+export function stripeWebhookSecret() {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) throw new ServiceUnavailableException("Stripe webhooks are not configured");
+  return secret;
+}
+
+export function checkoutProviderMode(): "stripe" | "mock" {
+  if (stripeConfigured()) {
+    if (!stripeWebhookConfigured()) throw new ServiceUnavailableException("Stripe webhooks are not configured");
+    return "stripe";
+  }
+  if (mockPaymentsEnabled()) return "mock";
   throw new ServiceUnavailableException("Payment provider is not configured");
 }
 
-export function verifyStripeWebhook(body: unknown, rawBody: Buffer | undefined, signatureHeader: string | undefined) {
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!secret) throw new ServiceUnavailableException("Stripe webhooks are not configured");
+export function verifyStripeWebhook(rawBody: Buffer | undefined, signatureHeader: string | undefined) {
+  const secret = stripeWebhookSecret();
   if (!rawBody) throw new BadRequestException("Stripe webhook raw body is unavailable");
   if (!signatureHeader) throw new BadRequestException("Missing Stripe signature");
 
-  const parts = Object.fromEntries(
-    signatureHeader.split(",").map((part) => {
-      const [key, value] = part.split("=", 2);
-      return [key, value];
-    })
-  );
-  const timestamp = Number(parts.t);
-  const signature = parts.v1;
-  if (!Number.isInteger(timestamp) || !signature) throw new BadRequestException("Invalid Stripe signature");
-  if (Math.abs(Date.now() / 1000 - timestamp) > STRIPE_TOLERANCE_SECONDS) throw new BadRequestException("Stale Stripe signature");
-
-  const expected = createHmac("sha256", secret).update(`${timestamp}.${rawBody.toString("utf8")}`).digest("hex");
-  if (!safeEqualHex(signature, expected)) throw new BadRequestException("Invalid Stripe signature");
-
-  return parseSuccessfulStripeEvent(body);
+  try {
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "sk_test_webhook_verification_only");
+    return parseSuccessfulStripeEvent(stripe.webhooks.constructEvent(rawBody, signatureHeader, secret));
+  } catch (error) {
+    if (error instanceof BadRequestException) throw error;
+    throw new BadRequestException("Invalid Stripe signature");
+  }
 }
 
 function parseSuccessfulStripeEvent(body: unknown) {
@@ -48,25 +63,25 @@ function parseSuccessfulStripeEvent(body: unknown) {
   if (!event.success) throw new BadRequestException(event.error.flatten());
   if (!SUCCESSFUL_STRIPE_EVENTS.has(event.data.type)) return null;
   if (event.data.type === "checkout.session.completed" && event.data.data.object.payment_status !== "paid") return null;
-  const bookingId = event.data.data.object.metadata?.bookingId;
-  if (!bookingId) throw new BadRequestException("Missing booking metadata");
   return event.data;
-}
-
-function safeEqualHex(actual: string, expected: string) {
-  if (!/^[a-f0-9]+$/i.test(actual)) return false;
-  const actualBuffer = Buffer.from(actual, "hex");
-  const expectedBuffer = Buffer.from(expected, "hex");
-  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
 const stripeEventInput = z.object({
   id: z.string().min(1),
+  created: z.number().int().positive(),
   type: z.string().min(1),
   data: z.object({
     object: z.object({
+      id: z.string().min(1).optional(),
       payment_status: z.string().optional(),
-      metadata: z.object({ bookingId: z.string().min(1) }).optional()
+      amount_total: z.number().int().optional(),
+      amount_received: z.number().int().optional(),
+      currency: z.string().optional(),
+      client_reference_id: z.string().nullable().optional(),
+      payment_intent: z.union([z.string(), z.object({ id: z.string().min(1) })]).nullable().optional(),
+      metadata: z.object({ bookingId: z.string().min(1).optional() }).optional()
     })
   })
 });
+
+export type StripePaymentEvent = NonNullable<ReturnType<typeof parseSuccessfulStripeEvent>>;

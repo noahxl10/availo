@@ -100,7 +100,7 @@ describe("dashboard and public API contracts", () => {
   });
 
   it("creates a capacity hold and checkout keeps booking pending until payment confirmation", async () => {
-    await withEnv({ ALLOW_MOCK_PAYMENTS: "true" }, async () => {
+    await withEnv({ ALLOW_MOCK_PAYMENTS: "true", STRIPE_SECRET_KEY: undefined }, async () => {
       const quote = await publicApi.quote({
         listingId: "lst_harbor_kayak_tour",
         date: dateAfterDays(14),
@@ -166,7 +166,7 @@ describe("dashboard and public API contracts", () => {
       addOns: []
     });
 
-    await withEnv({ ALLOW_MOCK_PAYMENTS: undefined, NODE_ENV: "production" }, async () => {
+    await withEnv({ ALLOW_MOCK_PAYMENTS: undefined, NODE_ENV: "production", STRIPE_SECRET_KEY: undefined }, async () => {
       await expect(
         publicApi.checkout({
           holdId: quote.holdId,
@@ -201,16 +201,159 @@ describe("dashboard and public API contracts", () => {
     }
   });
 
+  it("creates Stripe Checkout sessions bound to the pending booking amount and currency", async () => {
+    const fakeStripe = new FakeStripeCheckoutClient();
+    const stripePublicApi = new PublicService(prisma, fakeStripe);
+
+    await withEnv({ STRIPE_SECRET_KEY: "sk_test_checkout_binding", STRIPE_WEBHOOK_SECRET: "whsec_checkout_binding", ALLOW_MOCK_PAYMENTS: "true", APP_BASE_URL: "https://app.availo.test" }, async () => {
+      const quote = await stripePublicApi.quote({
+        listingId: "lst_harbor_kayak_tour",
+        date: dateAfterDays(17),
+        startTime: "9:30 AM",
+        adults: 2,
+        children: 0,
+        addOns: []
+      });
+
+      const checkout = await stripePublicApi.checkout({
+        holdId: quote.holdId,
+        listingId: "lst_harbor_kayak_tour",
+        date: dateAfterDays(17),
+        startTime: "9:30 AM",
+        adults: 2,
+        children: 0,
+        addOns: [],
+        customer: { name: "Stripe Checkout", email: "stripe-checkout@example.com" }
+      });
+
+      try {
+        expect(checkout.checkoutUrl).toBe("https://checkout.stripe.test/session");
+        expect(fakeStripe.lastRequest).toMatchObject({
+          bookingId: checkout.bookingId,
+          customerEmail: "stripe-checkout@example.com",
+          amountCents: quote.quote.totalCents,
+          currency: "usd",
+          successUrl: `https://app.availo.test/bookings/${checkout.bookingId}/confirmation`
+        });
+        expect((fakeStripe.lastRequest as { expiresAt: Date }).expiresAt.getTime() - Date.now()).toBeGreaterThan(30 * 60 * 1000);
+        const booking = await prisma.booking.findUniqueOrThrow({ where: { id: checkout.bookingId } });
+        expect(booking).toMatchObject({
+          paymentProvider: "stripe",
+          paymentReferenceId: "cs_test_bound",
+          paymentIntentId: "pi_test_bound",
+          paymentExpectedAmountCents: quote.quote.totalCents,
+          paymentExpectedCurrency: "usd"
+        });
+      } finally {
+        await cleanupBooking(checkout.bookingId);
+        await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
+      }
+    });
+  });
+
+  it("fails closed for Stripe checkout until webhook confirmation is configured", async () => {
+    const fakeStripe = new FakeStripeCheckoutClient();
+    const stripePublicApi = new PublicService(prisma, fakeStripe);
+    const quote = await stripePublicApi.quote({
+      listingId: "lst_harbor_kayak_tour",
+      date: dateAfterDays(18),
+      startTime: "9:30 AM",
+      adults: 1,
+      children: 0,
+      addOns: []
+    });
+
+    try {
+      await withEnv({ STRIPE_SECRET_KEY: "sk_test_without_webhook", STRIPE_WEBHOOK_SECRET: undefined, ALLOW_MOCK_PAYMENTS: undefined }, async () => {
+        await expect(
+          stripePublicApi.checkout({
+            holdId: quote.holdId,
+            listingId: "lst_harbor_kayak_tour",
+            date: dateAfterDays(18),
+            startTime: "9:30 AM",
+            adults: 1,
+            children: 0,
+            addOns: [],
+            customer: { name: "Stripe Missing Webhook", email: "stripe-missing-webhook@example.com" }
+          })
+        ).rejects.toThrow("Stripe webhooks are not configured");
+      });
+
+      expect(fakeStripe.lastRequest).toBeUndefined();
+      expect(await prisma.bookingHold.count({ where: { id: quote.holdId } })).toBe(1);
+      expect(await prisma.booking.count({ where: { customerEmail: "stripe-missing-webhook@example.com" } })).toBe(0);
+    } finally {
+      await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
+      await prisma.booking.deleteMany({ where: { customerEmail: "stripe-missing-webhook@example.com" } });
+    }
+  });
+
+  it("expires a created Stripe session when booking persistence cannot bind it", async () => {
+    const fakeStripe = new FakeStripeCheckoutClient(async (bookingId) => {
+      await prisma.booking.update({ where: { id: bookingId }, data: { status: "failed", paymentStatus: "failed" } });
+    });
+    const stripePublicApi = new PublicService(prisma, fakeStripe);
+
+    await withEnv({ STRIPE_SECRET_KEY: "sk_test_checkout_binding", STRIPE_WEBHOOK_SECRET: "whsec_checkout_binding", APP_BASE_URL: "https://app.availo.test" }, async () => {
+      const quote = await stripePublicApi.quote({
+        listingId: "lst_harbor_kayak_tour",
+        date: dateAfterDays(19),
+        startTime: "9:30 AM",
+        adults: 1,
+        children: 0,
+        addOns: []
+      });
+
+      try {
+        await expect(
+          stripePublicApi.checkout({
+            holdId: quote.holdId,
+            listingId: "lst_harbor_kayak_tour",
+            date: dateAfterDays(19),
+            startTime: "9:30 AM",
+            adults: 1,
+            children: 0,
+            addOns: [],
+            customer: { name: "Stripe Bind Failure", email: "stripe-bind-failure@example.com" }
+          })
+        ).rejects.toThrow("Stripe Checkout could not be attached to this booking");
+
+        expect(fakeStripe.expiredSessions).toEqual(["cs_test_bound"]);
+        const booking = await prisma.booking.findFirstOrThrow({ where: { customerEmail: "stripe-bind-failure@example.com" } });
+        expect(await prisma.auditLog.count({ where: { entityId: booking.id, action: "payment.checkout_failed" } })).toBe(1);
+      } finally {
+        await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
+        await prisma.booking.deleteMany({ where: { customerEmail: "stripe-bind-failure@example.com" } });
+      }
+    });
+  });
+
+  it("does not let mock confirmation settle Stripe-bound bookings", async () => {
+    const booking = await createPendingBooking("stripe-not-mock@example.com");
+    try {
+      await withEnv({ ALLOW_MOCK_PAYMENTS: "true", STRIPE_SECRET_KEY: undefined }, async () => {
+        await expect(payments.mockConfirm({ bookingId: booking.id, providerEventId: "evt_mock_cross_provider" })).rejects.toThrow("Booking is not awaiting payment");
+      });
+
+      const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(unchanged.status).toBe("pending_payment");
+      expect(unchanged.paymentStatus).toBe("pending");
+      expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(0);
+    } finally {
+      await cleanupBooking(booking.id);
+    }
+  });
+
   it("verifies Stripe webhooks before confirming pending bookings", async () => {
     const booking = await createPendingBooking("stripe-valid@example.com");
-    const body = stripeWebhookBody("evt_stripe_valid", "checkout.session.completed", booking.id, { payment_status: "paid" });
+    const body = stripeWebhookBody("evt_stripe_valid", "checkout.session.completed", booking, { payment_status: "paid" });
 
     await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
       const result = await payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "whsec_test_secret"), { rawBody: Buffer.from(body) });
       expect(result).toEqual({ ok: true, duplicate: false, bookingId: booking.id });
       const duplicate = await payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "whsec_test_secret"), { rawBody: Buffer.from(body) });
       expect(duplicate).toEqual({ ok: true, duplicate: true, bookingId: booking.id });
-      const relatedBody = stripeWebhookBody("evt_stripe_related_success", "payment_intent.succeeded", booking.id);
+      const relatedBody = stripeWebhookBody("evt_stripe_related_success", "payment_intent.succeeded", booking);
       const related = await payments.stripeWebhook(JSON.parse(relatedBody), stripeSignature(relatedBody, "whsec_test_secret"), { rawBody: Buffer.from(relatedBody) });
       expect(related).toEqual({ ok: true, ignored: true, bookingId: booking.id });
       expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(2);
@@ -225,7 +368,7 @@ describe("dashboard and public API contracts", () => {
 
   it("rejects invalid Stripe signatures without mutating payment state", async () => {
     const booking = await createPendingBooking("stripe-invalid@example.com");
-    const body = stripeWebhookBody("evt_stripe_invalid", "checkout.session.completed", booking.id);
+    const body = stripeWebhookBody("evt_stripe_invalid", "checkout.session.completed", booking, { payment_status: "paid" });
 
     try {
       await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
@@ -245,8 +388,8 @@ describe("dashboard and public API contracts", () => {
 
   it("ignores unsupported Stripe events and refuses to resurrect settled bookings", async () => {
     const ignoredBooking = await createPendingBooking("stripe-ignored@example.com");
-    const ignoredBody = stripeWebhookBody("evt_stripe_ignored", "payment_intent.created", ignoredBooking.id);
-    const unpaidCheckoutBody = stripeWebhookBody("evt_stripe_unpaid_checkout", "checkout.session.completed", ignoredBooking.id, { payment_status: "unpaid" });
+    const ignoredBody = stripeWebhookBody("evt_stripe_ignored", "payment_intent.created", ignoredBooking);
+    const unpaidCheckoutBody = stripeWebhookBody("evt_stripe_unpaid_checkout", "checkout.session.completed", ignoredBooking, { payment_status: "unpaid" });
 
     await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
       const result = await payments.stripeWebhook(JSON.parse(ignoredBody), stripeSignature(ignoredBody, "whsec_test_secret"), { rawBody: Buffer.from(ignoredBody) });
@@ -262,7 +405,7 @@ describe("dashboard and public API contracts", () => {
 
     const canceledBooking = await createPendingBooking("stripe-canceled@example.com");
     await prisma.booking.update({ where: { id: canceledBooking.id }, data: { status: "canceled", paymentStatus: "failed" } });
-    const canceledBody = stripeWebhookBody("evt_stripe_canceled", "payment_intent.succeeded", canceledBooking.id);
+    const canceledBody = stripeWebhookBody("evt_stripe_canceled", "payment_intent.succeeded", canceledBooking);
     try {
       await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
         const result = await payments.stripeWebhook(JSON.parse(canceledBody), stripeSignature(canceledBody, "whsec_test_secret"), { rawBody: Buffer.from(canceledBody) });
@@ -282,7 +425,7 @@ describe("dashboard and public API contracts", () => {
   it("records verified Stripe payments received after pending payment expiry", async () => {
     const booking = await createPendingBooking("stripe-expired@example.com");
     await prisma.booking.update({ where: { id: booking.id }, data: { paymentExpiresAt: new Date(Date.now() - 60_000) } });
-    const body = stripeWebhookBody("evt_stripe_expired", "payment_intent.succeeded", booking.id);
+    const body = stripeWebhookBody("evt_stripe_expired", "payment_intent.succeeded", booking);
 
     try {
       await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
@@ -295,6 +438,51 @@ describe("dashboard and public API contracts", () => {
       expect(unchanged.paymentStatus).toBe("pending");
       expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(1);
       expect(await prisma.auditLog.count({ where: { entityId: booking.id, action: "payment.ignored" } })).toBe(1);
+    } finally {
+      await cleanupBooking(booking.id);
+    }
+  });
+
+  it("confirms Stripe payments completed before expiry even when webhook delivery is delayed", async () => {
+    const booking = await createPendingBooking("stripe-delayed-webhook@example.com");
+    const paymentExpiresAt = new Date(Date.now() - 60_000);
+    await prisma.booking.update({ where: { id: booking.id }, data: { paymentExpiresAt } });
+    const delayedBooking = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+    const body = stripeWebhookBody("evt_stripe_delayed_before_expiry", "checkout.session.completed", delayedBooking, {
+      payment_status: "paid",
+      created: Math.floor((paymentExpiresAt.getTime() - 10_000) / 1000)
+    });
+
+    try {
+      await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
+        const result = await payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "whsec_test_secret"), { rawBody: Buffer.from(body) });
+        expect(result).toEqual({ ok: true, duplicate: false, bookingId: booking.id });
+      });
+
+      const confirmed = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(confirmed.status).toBe("confirmed");
+      expect(confirmed.paymentStatus).toBe("paid");
+    } finally {
+      await cleanupBooking(booking.id);
+    }
+  });
+
+  it("records verified Stripe money or provider ID mismatches without confirming the booking", async () => {
+    const booking = await createPendingBooking("stripe-mismatch@example.com");
+    const body = stripeWebhookBody("evt_stripe_amount_mismatch", "checkout.session.completed", booking, { payment_status: "paid", amount_total: booking.totalCents + 1 });
+
+    try {
+      await withEnv({ STRIPE_WEBHOOK_SECRET: "whsec_test_secret" }, async () => {
+        const result = await payments.stripeWebhook(JSON.parse(body), stripeSignature(body, "whsec_test_secret"), { rawBody: Buffer.from(body) });
+        expect(result).toEqual({ ok: true, ignored: true, bookingId: booking.id });
+      });
+
+      const unchanged = await prisma.booking.findUniqueOrThrow({ where: { id: booking.id } });
+      expect(unchanged.status).toBe("pending_payment");
+      expect(unchanged.paymentStatus).toBe("pending");
+      expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(1);
+      const audit = await prisma.auditLog.findFirstOrThrow({ where: { entityId: booking.id, action: "payment.ignored" } });
+      expect(audit.metadataJson).toContain("stripe_amount_mismatch");
     } finally {
       await cleanupBooking(booking.id);
     }
@@ -333,7 +521,11 @@ describe("dashboard and public API contracts", () => {
         childCount: 0,
         status: "pending_payment",
         paymentStatus: "pending",
-        paymentReferenceId: prefixedId("payref"),
+        paymentProvider: "stripe",
+        paymentReferenceId: prefixedId("cs"),
+        paymentIntentId: prefixedId("pi"),
+        paymentExpectedAmountCents: 7443,
+        paymentExpectedCurrency: "usd",
         paymentExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
         subtotalCents: 6500,
         taxCents: 553,
@@ -365,11 +557,26 @@ describe("dashboard and public API contracts", () => {
     }
   }
 
-  function stripeWebhookBody(eventId: string, eventType: string, bookingId: string, objectFields: Record<string, string> = {}) {
+  function stripeWebhookBody(eventId: string, eventType: string, booking: Awaited<ReturnType<typeof createPendingBooking>>, objectFields: Record<string, string | number> = {}) {
+    const isCheckoutSession = eventType === "checkout.session.completed";
+    const objectId = isCheckoutSession ? booking.paymentReferenceId : booking.paymentIntentId;
+    const moneyField = isCheckoutSession ? { amount_total: booking.paymentExpectedAmountCents } : { amount_received: booking.paymentExpectedAmountCents };
+    const { created = Math.floor(Date.now() / 1000), ...stripeObjectFields } = objectFields;
     return JSON.stringify({
       id: eventId,
+      created,
       type: eventType,
-      data: { object: { ...objectFields, metadata: { bookingId } } }
+      data: {
+        object: {
+          id: objectId,
+          currency: booking.paymentExpectedCurrency,
+          client_reference_id: booking.id,
+          payment_intent: booking.paymentIntentId,
+          ...moneyField,
+          ...stripeObjectFields,
+          metadata: { bookingId: booking.id }
+        }
+      }
     });
   }
 
@@ -382,5 +589,22 @@ describe("dashboard and public API contracts", () => {
     const date = new Date();
     date.setUTCDate(date.getUTCDate() + days);
     return date.toISOString().slice(0, 10);
+  }
+
+  class FakeStripeCheckoutClient {
+    lastRequest: unknown;
+    expiredSessions: string[] = [];
+
+    constructor(private readonly beforeReturn?: (bookingId: string) => Promise<void>) {}
+
+    async createCheckoutSession(input: { bookingId: string }) {
+      this.lastRequest = input;
+      await this.beforeReturn?.(input.bookingId);
+      return { id: "cs_test_bound", url: "https://checkout.stripe.test/session", paymentIntentId: "pi_test_bound" };
+    }
+
+    async expireCheckoutSession(sessionId: string) {
+      this.expiredSessions.push(sessionId);
+    }
   }
 });

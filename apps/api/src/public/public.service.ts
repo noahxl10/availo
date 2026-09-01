@@ -1,9 +1,10 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { platformFeeCents } from "../common/money.js";
-import { assertPaymentProviderConfigured } from "../payments/payment-config.js";
+import { checkoutProviderMode, STRIPE_WEBHOOK_GRACE_MS } from "../payments/payment-config.js";
+import { StripeCheckoutClient } from "../payments/stripe-checkout.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const quoteInputBase = z.object({
@@ -40,12 +41,16 @@ function rejectDuplicateAddOns(input: z.infer<typeof quoteInputBase>, context: z
 }
 
 const HOLD_TTL_MS = 15 * 60 * 1000;
+const STRIPE_CHECKOUT_TTL_MS = 31 * 60 * 1000;
 const CAPACITY_RETRY_LIMIT = 3;
 const DEFAULT_BOOKING_HORIZON_DAYS = 548;
 
 @Injectable()
 export class PublicService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Optional() private readonly stripeCheckout: StripeCheckoutClient = new StripeCheckoutClient()
+  ) {}
 
   async businessListings(slug: string) {
     const business = await this.prisma.business.findUnique({ where: { slug } });
@@ -151,7 +156,7 @@ export class PublicService {
 
   async checkout(body: unknown) {
     const input = parse(checkoutInput, body);
-    assertPaymentProviderConfigured();
+    const provider = checkoutProviderMode();
     const booking = await retryCapacityTransaction(() =>
       this.prisma.$transaction(async (tx) => {
         const now = new Date();
@@ -163,7 +168,7 @@ export class PublicService {
         }
         const listing = await tx.listing.findFirstOrThrow({
           where: { id: hold.listingId, status: "active" },
-          include: { rules: true, exceptions: true }
+          include: { business: true, rules: true, exceptions: true }
         });
         const deletedHold = await tx.bookingHold.deleteMany({ where: { id: hold.id, expiresAt: { gt: now } } });
         if (deletedHold.count !== 1) throw new BadRequestException("Hold is invalid or expired");
@@ -172,6 +177,7 @@ export class PublicService {
         if (!slot || slot.capacityRemaining < hold.guestCount) {
           throw new BadRequestException("Selected slot is unavailable");
         }
+        const paymentExpiresAt = new Date(now.getTime() + paymentTtlMs(provider));
         const created = await tx.booking.create({
           data: {
             id: prefixedId("bok"),
@@ -188,8 +194,11 @@ export class PublicService {
             childCount: quote.childCount,
             status: "pending_payment",
             paymentStatus: "pending",
-            paymentReferenceId: `mock_${input.holdId}`,
-            paymentExpiresAt: new Date(now.getTime() + HOLD_TTL_MS),
+            paymentProvider: provider,
+            paymentReferenceId: provider === "mock" ? `mock_${input.holdId}` : null,
+            paymentExpectedAmountCents: quote.totalCents,
+            paymentExpectedCurrency: normalizedCurrency(listing.business.currency),
+            paymentExpiresAt,
             subtotalCents: quote.subtotalCents,
             taxCents: quote.taxCents,
             platformFeeCents: quote.platformFeeCents,
@@ -218,17 +227,77 @@ export class PublicService {
             entityId: created.id
           }
         });
-        return created;
+        return { ...created, listingTitle: listing.title };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
     );
     const apiBaseUrl = process.env.API_BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
-    return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}` };
+    if (provider === "mock") {
+      return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}` };
+    }
+
+    const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+    let session: Awaited<ReturnType<StripeCheckoutClient["createCheckoutSession"]>> | null = null;
+    try {
+      session = await this.stripeCheckout.createCheckoutSession({
+        bookingId: booking.id,
+        customerEmail: booking.customerEmail,
+        listingTitle: booking.listingTitle,
+        amountCents: booking.totalCents,
+        currency: requiredPaymentCurrency(booking.paymentExpectedCurrency),
+        expiresAt: requiredPaymentExpiry(booking.paymentExpiresAt),
+        successUrl: `${appBaseUrl}/bookings/${booking.id}/confirmation`,
+        cancelUrl: `${appBaseUrl}/`
+      });
+      const updated = await this.prisma.booking.updateMany({
+        where: {
+          id: booking.id,
+          status: "pending_payment",
+          paymentStatus: "pending",
+          paymentProvider: "stripe",
+          paymentReferenceId: null,
+          paymentExpiresAt: { gt: new Date() }
+        },
+        data: { paymentReferenceId: session.id, paymentIntentId: session.paymentIntentId }
+      });
+      if (updated.count !== 1) {
+        await this.expireCheckoutSession(session.id);
+        await this.recordCheckoutFailure(booking.businessId, booking.id, "booking_not_awaiting_payment");
+        throw new ServiceUnavailableException("Stripe Checkout could not be attached to this booking");
+      }
+      return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: session.url };
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw error;
+      if (session) await this.expireCheckoutSession(session.id);
+      await this.recordCheckoutFailure(booking.businessId, booking.id, "stripe_session_create_failed");
+      throw new ServiceUnavailableException("Stripe Checkout could not be created");
+    }
+  }
+
+  private async expireCheckoutSession(sessionId: string) {
+    try {
+      await this.stripeCheckout.expireCheckoutSession(sessionId);
+    } catch {
+      // The failure audit below is the durable recovery marker; avoid leaking provider errors to callers.
+    }
   }
 
   async confirmation(id: string) {
     const booking = await this.prisma.booking.findFirst({ where: { id, status: "confirmed" }, include: { listing: true } });
     if (!booking) throw new NotFoundException("Confirmed booking not found");
     return { id: booking.id, status: booking.status, listing: booking.listing.title, totalCents: booking.totalCents };
+  }
+
+  private async recordCheckoutFailure(businessId: string, bookingId: string, reason: string) {
+    await this.prisma.auditLog.create({
+      data: {
+        id: prefixedId("aud"),
+        businessId,
+        action: "payment.checkout_failed",
+        entityType: "booking",
+        entityId: bookingId,
+        metadataJson: JSON.stringify({ provider: "stripe", reason })
+      }
+    });
   }
 }
 
@@ -267,6 +336,26 @@ function positiveEnvInt(name: string, fallback: number) {
     throw new Error(`${name} must be a positive integer.`);
   }
   return value;
+}
+
+function normalizedCurrency(currency: string) {
+  const normalized = currency.toLowerCase();
+  if (!/^[a-z]{3}$/.test(normalized)) throw new ServiceUnavailableException("Business currency is not supported for checkout");
+  return normalized;
+}
+
+function requiredPaymentCurrency(currency: string | null) {
+  if (!currency) throw new ServiceUnavailableException("Booking payment currency is missing");
+  return normalizedCurrency(currency);
+}
+
+function requiredPaymentExpiry(paymentExpiresAt: Date | null) {
+  if (!paymentExpiresAt) throw new ServiceUnavailableException("Booking payment expiry is missing");
+  return paymentExpiresAt;
+}
+
+function paymentTtlMs(provider: "stripe" | "mock") {
+  return provider === "stripe" ? STRIPE_CHECKOUT_TTL_MS : HOLD_TTL_MS;
 }
 
 type QuoteInput = z.infer<typeof quoteInput>;
@@ -364,6 +453,12 @@ function capacityBookingWhere(date: string, now: Date, extra: { listingId?: stri
         status: "pending_payment" as const,
         paymentStatus: "pending" as const,
         paymentExpiresAt: { gt: now }
+      },
+      {
+        status: "pending_payment" as const,
+        paymentStatus: "pending" as const,
+        paymentProvider: "stripe",
+        paymentExpiresAt: { gt: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS) }
       }
     ]
   };

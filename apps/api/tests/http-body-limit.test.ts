@@ -74,8 +74,17 @@ describe("HTTP body limits", () => {
     const eventId = prefixedId("evt");
     const body = JSON.stringify({
       id: eventId,
+      created: Math.floor(Date.now() / 1000),
       type: "payment_intent.succeeded",
-      data: { object: { metadata: { bookingId: booking.id }, padding: "x".repeat(2_000) } }
+      data: {
+        object: {
+          id: booking.paymentIntentId,
+          amount_received: booking.paymentExpectedAmountCents,
+          currency: booking.paymentExpectedCurrency,
+          metadata: { bookingId: booking.id },
+          padding: "x".repeat(2_000)
+        }
+      }
     });
 
     try {
@@ -104,12 +113,16 @@ describe("HTTP body limits", () => {
     const eventId = prefixedId("evt");
     const body = `{
       "id": "${eventId}",
-      "type": "payment_intent.succeeded",
-      "data": {
-        "object": {
-          "metadata": {
-            "bookingId": "${booking.id}"
-          }
+      "created": ${Math.floor(Date.now() / 1000)},
+          "type": "payment_intent.succeeded",
+          "data": {
+            "object": {
+              "id": "${booking.paymentIntentId}",
+              "amount_received": ${booking.paymentExpectedAmountCents},
+              "currency": "${booking.paymentExpectedCurrency}",
+              "metadata": {
+                "bookingId": "${booking.id}"
+              }
         }
       }
     }`;
@@ -177,7 +190,11 @@ describe("HTTP body limits", () => {
         childCount: 0,
         status: "pending_payment",
         paymentStatus: "pending",
-        paymentReferenceId: prefixedId("payref"),
+        paymentProvider: "stripe",
+        paymentReferenceId: prefixedId("cs"),
+        paymentIntentId: prefixedId("pi"),
+        paymentExpectedAmountCents: 7443,
+        paymentExpectedCurrency: "usd",
         paymentExpiresAt: new Date(Date.now() + 15 * 60 * 1000),
         subtotalCents: 6500,
         taxCents: 553,

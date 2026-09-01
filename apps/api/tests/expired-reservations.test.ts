@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { DEMO_BUSINESS_ID } from "../src/common/tenant.js";
 import { prefixedId } from "../src/common/ids.js";
 import { cleanupExpiredReservations, expiredReservationCleanupBatchSize } from "../src/maintenance/expired-reservations.js";
+import { STRIPE_WEBHOOK_GRACE_MS } from "../src/payments/payment-config.js";
 import { PaymentController } from "../src/payments/payment.controller.js";
 import { PublicService } from "../src/public/public.service.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
@@ -47,7 +48,7 @@ describe("expired reservation cleanup", () => {
     const expired = await createBooking(fixture, "cleanup-expired@example.invalid", {
       status: "pending_payment",
       paymentStatus: "pending",
-      paymentExpiresAt: now
+      paymentExpiresAt: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS - 1)
     });
     const active = await createBooking(fixture, "cleanup-active@example.invalid", {
       status: "pending_payment",
@@ -64,19 +65,22 @@ describe("expired reservation cleanup", () => {
       paymentStatus: "paid",
       paymentExpiresAt: now
     });
+    const expirer = new FakeCheckoutSessionExpirer();
 
     try {
-      const result = await cleanupExpiredReservations(prisma, { now, batchSize: 10 });
+      const result = await cleanupExpiredReservations(prisma, { now, batchSize: 10, checkoutSessionExpirer: expirer });
       expect(result).toEqual({ expiredHoldsDeleted: 0, expiredBookingsFailed: 1 });
 
       await expect(prisma.booking.findUniqueOrThrow({ where: { id: expired.id } })).resolves.toMatchObject({ status: "failed", paymentStatus: "failed", totalCents: 10600 });
       await expect(prisma.booking.findUniqueOrThrow({ where: { id: active.id } })).resolves.toMatchObject({ status: "pending_payment", paymentStatus: "pending" });
       await expect(prisma.booking.findUniqueOrThrow({ where: { id: legacy.id } })).resolves.toMatchObject({ status: "pending_payment", paymentStatus: "pending" });
       await expect(prisma.booking.findUniqueOrThrow({ where: { id: confirmed.id } })).resolves.toMatchObject({ status: "confirmed", paymentStatus: "paid" });
+      expect(expirer.expiredSessions).toEqual([expired.paymentReferenceId]);
 
       expect(await prisma.auditLog.count({ where: { entityId: expired.id, action: "booking.payment_expired" } })).toBe(1);
-      const idempotent = await cleanupExpiredReservations(prisma, { now, batchSize: 10 });
+      const idempotent = await cleanupExpiredReservations(prisma, { now, batchSize: 10, checkoutSessionExpirer: expirer });
       expect(idempotent).toEqual({ expiredHoldsDeleted: 0, expiredBookingsFailed: 0 });
+      expect(expirer.expiredSessions).toEqual([expired.paymentReferenceId]);
       expect(await prisma.auditLog.count({ where: { entityId: expired.id, action: "booking.payment_expired" } })).toBe(1);
     } finally {
       await cleanupListingFixture(fixture.listingId);
@@ -89,7 +93,7 @@ describe("expired reservation cleanup", () => {
     const expiredBooking = await createBooking(fixture, "cleanup-capacity-expired@example.invalid", {
       status: "pending_payment",
       paymentStatus: "pending",
-      paymentExpiresAt: new Date(now.getTime() - 60_000)
+      paymentExpiresAt: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS - 60_000)
     });
     const activeHold = await createHold(fixture, new Date(now.getTime() + 60_000));
 
@@ -112,15 +116,36 @@ describe("expired reservation cleanup", () => {
     }
   });
 
+  it("keeps Stripe pending payments capacity-reserving during webhook grace only", async () => {
+    const fixture = await createListingFixture({ capacity: 2 });
+    const now = new Date();
+    const booking = await createBooking(fixture, "cleanup-stripe-grace-capacity@example.invalid", {
+      status: "pending_payment",
+      paymentStatus: "pending",
+      paymentExpiresAt: new Date(now.getTime() - 60_000)
+    });
+
+    try {
+      const duringGrace = await publicApi.availability(fixture.listingId, fixture.date);
+      expect(duringGrace.slots.find((slot) => slot.startTime === fixture.startTime)?.capacityRemaining).toBe(0);
+
+      await prisma.booking.update({ where: { id: booking.id }, data: { paymentExpiresAt: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS - 60_000) } });
+      const afterGrace = await publicApi.availability(fixture.listingId, fixture.date);
+      expect(afterGrace.slots.find((slot) => slot.startTime === fixture.startTime)?.capacityRemaining).toBe(2);
+    } finally {
+      await cleanupListingFixture(fixture.listingId);
+    }
+  });
+
   it("records late verified payments as ignored after cleanup expires the booking", async () => {
     const fixture = await createListingFixture({ capacity: 2 });
     const now = new Date();
     const booking = await createBooking(fixture, "cleanup-late-payment@example.invalid", {
       status: "pending_payment",
       paymentStatus: "pending",
-      paymentExpiresAt: new Date(now.getTime() - 60_000)
+      paymentExpiresAt: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS - 60_000)
     });
-    const body = stripeWebhookBody(prefixedId("evt"), "payment_intent.succeeded", booking.id);
+    const body = stripeWebhookBody(prefixedId("evt"), "payment_intent.succeeded", booking);
 
     try {
       await cleanupExpiredReservations(prisma, { now, batchSize: 10 });
@@ -229,7 +254,11 @@ describe("expired reservation cleanup", () => {
         childCount: 0,
         status: state.status,
         paymentStatus: state.paymentStatus,
-        paymentReferenceId: prefixedId("payref"),
+        paymentProvider: "stripe",
+        paymentReferenceId: prefixedId("cs"),
+        paymentIntentId: prefixedId("pi"),
+        paymentExpectedAmountCents: 10600,
+        paymentExpectedCurrency: "usd",
         paymentExpiresAt: state.paymentExpiresAt,
         subtotalCents: 10000,
         taxCents: 0,
@@ -281,11 +310,19 @@ describe("expired reservation cleanup", () => {
     }
   }
 
-  function stripeWebhookBody(eventId: string, eventType: string, bookingId: string) {
+  function stripeWebhookBody(eventId: string, eventType: string, booking: Awaited<ReturnType<typeof createBooking>>) {
     return JSON.stringify({
       id: eventId,
+      created: Math.floor(Date.now() / 1000),
       type: eventType,
-      data: { object: { metadata: { bookingId } } }
+      data: {
+        object: {
+          id: booking.paymentIntentId,
+          amount_received: booking.paymentExpectedAmountCents,
+          currency: booking.paymentExpectedCurrency,
+          metadata: { bookingId: booking.id }
+        }
+      }
     });
   }
 
@@ -298,5 +335,13 @@ describe("expired reservation cleanup", () => {
     const date = new Date();
     date.setUTCDate(date.getUTCDate() + days);
     return date.toISOString().slice(0, 10);
+  }
+
+  class FakeCheckoutSessionExpirer {
+    expiredSessions: string[] = [];
+
+    async expireCheckoutSession(sessionId: string) {
+      this.expiredSessions.push(sessionId);
+    }
   }
 });

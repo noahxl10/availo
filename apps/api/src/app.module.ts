@@ -10,11 +10,12 @@ import { BookingService } from "./bookings/booking.service.js";
 import { PublicController } from "./public/public.controller.js";
 import { PublicService } from "./public/public.service.js";
 import { PaymentController } from "./payments/payment.controller.js";
+import { StripeCheckoutClient } from "./payments/stripe-checkout.js";
 import { PrismaService } from "./prisma/prisma.service.js";
 import { PublicQuoteRateLimiter } from "./public/public-rate-limit.js";
 
 @Module({
   controllers: [AuthController, BusinessController, DashboardController, ListingController, BookingController, PublicController, PaymentController],
-  providers: [PrismaService, DashboardService, ListingService, BookingService, PublicService, PublicQuoteRateLimiter]
+  providers: [PrismaService, DashboardService, ListingService, BookingService, PublicService, PublicQuoteRateLimiter, StripeCheckoutClient]
 })
 export class AppModule {}

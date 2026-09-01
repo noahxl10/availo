@@ -55,8 +55,8 @@ API variables live in `apps/api/.env`.
 | `PUBLIC_RATE_LIMIT_MAX_KEYS` | No | Maximum active in-memory client buckets for public rate limits. Defaults to `10000`. |
 | `PUBLIC_BOOKING_HORIZON_DAYS` | No | Maximum quote date horizon, in days from the API server date. Defaults to `548`. |
 | `TRUST_PROXY_HOPS` | No | Number of trusted reverse-proxy hops for client IP detection. Defaults to `0`, which ignores forwarded IP headers. |
-| `STRIPE_SECRET_KEY` | No | Stripe API key for future real payment flows. |
-| `STRIPE_WEBHOOK_SECRET` | No | Enables Stripe webhook signature requirements when set. |
+| `STRIPE_SECRET_KEY` | No | Enables hosted Stripe Checkout session creation. |
+| `STRIPE_WEBHOOK_SECRET` | No | Required to verify Stripe webhooks before bookings can be confirmed by Stripe. |
 | `ALLOW_MOCK_PAYMENTS` | No | Local/demo-only opt-in for mock checkout confirmation. Never enable in production. |
 
 Dashboard variables live in `apps/dashboard/.env.local`.
@@ -79,7 +79,9 @@ Do not deploy with `CORS_ORIGINS="*"`. The API uses credentialed CORS and reject
 
 Public quote creation has a small in-process rate limiter for single-node self-hosted installs. It is not shared across multiple API replicas. If active client buckets reach `PUBLIC_RATE_LIMIT_MAX_KEYS`, newly seen clients fail closed with `429` until older buckets expire; raise the cap only when the host has enough memory. If the API runs behind one trusted reverse proxy, set `TRUST_PROXY_HOPS="1"` and configure the proxy to strip client-supplied forwarding headers before adding its own; otherwise leave `TRUST_PROXY_HOPS="0"` so spoofed `X-Forwarded-For` values are ignored.
 
-Mock checkout is intentionally local-only. Production checkout fails closed until a real payment provider is configured in code; setting Stripe webhook secrets verifies inbound Stripe events but does not create Stripe Checkout sessions by itself.
+When `STRIPE_SECRET_KEY` is set, public checkout creates a hosted Stripe Checkout session and binds the pending booking to the returned Checkout Session ID, PaymentIntent ID when available, expected amount, and expected currency. Configure Stripe to send events to `POST /payments/stripe/webhook` and set `STRIPE_WEBHOOK_SECRET`; Availo confirms a booking only after a signed successful Stripe event matches the stored provider IDs and money fields. Stripe checkout reservations use a 31-minute payment expiry, aligned with Stripe's minimum custom Checkout Session expiry with a small clock/request buffer.
+
+Mock checkout is intentionally local-only and is ignored when `STRIPE_SECRET_KEY` is configured. Keep `ALLOW_MOCK_PAYMENTS` false or unset in production.
 
 Refund requests also fail closed until Availo has an authenticated refund provider flow.
 
@@ -91,13 +93,13 @@ The Prisma schema is in `apps/api/prisma/schema.prisma`. If you switch providers
 
 ## Expired reservation cleanup
 
-Availo ignores expired holds and expired pending payments when calculating capacity, even before cleanup runs. To keep storage and booking state tidy, schedule:
+Availo ignores expired quote holds and expired non-Stripe pending payments when calculating capacity, even before cleanup runs. Stripe pending payments keep reserving capacity for a 10-minute webhook delivery grace window after their payment expiry so a payment completed before expiry can still confirm safely. To keep storage and booking state tidy, schedule:
 
 ```sh
 npm run cleanup:expired-reservations
 ```
 
-Each run deletes at most `EXPIRED_RESERVATION_CLEANUP_BATCH_SIZE` expired quote holds and marks at most that many expired pending-payment bookings as failed with an audit entry. Run it every few minutes on a small host; increase the batch size only after observing database write latency.
+Each run deletes at most `EXPIRED_RESERVATION_CLEANUP_BATCH_SIZE` expired quote holds and marks at most that many expired pending-payment bookings as failed with an audit entry. For Stripe bookings, cleanup waits until the 10-minute webhook grace window has elapsed, then expires the open Checkout Session. Run it every few minutes on a small host so released capacity cannot be paid for through an old hosted Checkout URL; increase the batch size only after observing database write latency.
 
 ## Upgrades
 
