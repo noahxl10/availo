@@ -1,8 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { AddressInfo } from "node:net";
+import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
+import { configureApiHttp } from "../src/api-http.js";
+import { AppModule } from "../src/app.module.js";
 import { DEMO_BUSINESS_ID } from "../src/common/tenant.js";
 import { prefixedId } from "../src/common/ids.js";
 import { PublicController } from "../src/public/public.controller.js";
-import { PublicQuoteRateLimiter } from "../src/public/public-rate-limit.js";
+import { PublicCheckoutRateLimiter, PublicQuoteRateLimiter } from "../src/public/public-rate-limit.js";
 import { PublicService } from "../src/public/public.service.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
 
@@ -146,7 +151,7 @@ describe("quote hold capacity lifecycle", () => {
 
     await withEnv({ PUBLIC_QUOTE_RATE_LIMIT: "2", PUBLIC_QUOTE_RATE_WINDOW_SECONDS: "900", PUBLIC_RATE_LIMIT_MAX_KEYS: "100" }, async () => {
       const limiter = new PublicQuoteRateLimiter();
-      const controller = new PublicController(publicApi, limiter);
+      const controller = new PublicController(publicApi, limiter, new PublicCheckoutRateLimiter());
       const body = quoteBody(fixture);
 
       try {
@@ -170,6 +175,141 @@ describe("quote hold capacity lifecycle", () => {
       } finally {
         await cleanupListingFixture(fixture.listingId);
       }
+    });
+  });
+
+  it("rate limits public checkout before consuming holds or creating bookings", async () => {
+    const fixture = await createListingFixture({ capacity: 8 });
+    const fakeStripe = new FakeStripeCheckoutClient();
+
+    await withEnv(
+      {
+        PUBLIC_CHECKOUT_RATE_LIMIT: "1",
+        PUBLIC_CHECKOUT_RATE_WINDOW_SECONDS: "900",
+        PUBLIC_RATE_LIMIT_MAX_KEYS: "100",
+        STRIPE_SECRET_KEY: "sk_test_checkout_limit",
+        STRIPE_WEBHOOK_SECRET: "whsec_checkout_limit",
+        APP_BASE_URL: "https://app.availo.test"
+      },
+      async () => {
+        const stripePublicApi = new PublicService(prisma, fakeStripe as never);
+        const controller = new PublicController(stripePublicApi, new PublicQuoteRateLimiter(), new PublicCheckoutRateLimiter());
+        const quote = await stripePublicApi.quote(quoteBody(fixture));
+
+        try {
+          await expect(
+            controller.checkout({ ...checkoutBody(fixture, quote.holdId), holdId: "hold_missing_rate_limit" }, { ip: "203.0.113.30" } as never, responseRecorder())
+          ).rejects.toThrow("Hold is invalid or expired");
+
+          const beforeRejectedHolds = await prisma.bookingHold.count({ where: { id: quote.holdId } });
+          const beforeRejectedBookings = await prisma.booking.count({ where: { listingId: fixture.listingId } });
+          const rejectedResponse = responseRecorder();
+
+          expect(() => controller.checkout(checkoutBody(fixture, quote.holdId), { ip: "203.0.113.30" } as never, rejectedResponse)).toThrow("Too many checkout requests");
+
+          expect(await prisma.bookingHold.count({ where: { id: quote.holdId } })).toBe(beforeRejectedHolds);
+          expect(await prisma.booking.count({ where: { listingId: fixture.listingId } })).toBe(beforeRejectedBookings);
+          expect(await prisma.auditLog.count({ where: { entityId: quote.holdId } })).toBe(0);
+          expect(fakeStripe.createCheckoutSessionCalls).toBe(0);
+          expect(rejectedResponse.headers["cache-control"]).toBe("no-store");
+          expect(rejectedResponse.headers["retry-after"]).toEqual(expect.stringMatching(/^\d+$/));
+          expect(rejectedResponse.headers["ratelimit-limit"]).toBe("1");
+          expect(rejectedResponse.headers["ratelimit-remaining"]).toBe("0");
+          expect(Number(rejectedResponse.headers["ratelimit-reset"])).toBeLessThanOrEqual(900);
+
+          const otherClientResponse = responseRecorder();
+          await expect(controller.checkout(checkoutBody(fixture, quote.holdId), { ip: "203.0.113.31" } as never, otherClientResponse)).resolves.toMatchObject({
+            status: "pending_payment",
+            checkoutUrl: "https://checkout.stripe.test/session"
+          });
+          expect(fakeStripe.createCheckoutSessionCalls).toBe(1);
+        } finally {
+          await cleanupListingFixture(fixture.listingId);
+        }
+      }
+    );
+  });
+
+  it("applies checkout rate limits over HTTP with trusted proxy semantics", async () => {
+    await withEnv(
+      {
+        PUBLIC_CHECKOUT_RATE_LIMIT: "1",
+        PUBLIC_CHECKOUT_RATE_WINDOW_SECONDS: "900",
+        PUBLIC_RATE_LIMIT_MAX_KEYS: "100",
+        ALLOW_MOCK_PAYMENTS: "true",
+        STRIPE_SECRET_KEY: undefined,
+        TRUST_PROXY_HOPS: "0"
+      },
+      async () => {
+        const fixture = await createListingFixture({ capacity: 8 });
+        const quote = await publicApi.quote(quoteBody(fixture));
+
+        try {
+          await withHttpApp(async (baseUrl) => {
+            const first = await postCheckoutHttp(baseUrl, { ...checkoutBody(fixture, quote.holdId), holdId: "hold_missing_http_limiter" }, "198.51.100.10");
+            expect(first.status).toBe(400);
+
+            const beforeHolds = await prisma.bookingHold.count({ where: { id: quote.holdId } });
+            const beforeBookings = await prisma.booking.count({ where: { listingId: fixture.listingId } });
+            const beforeAudits = await prisma.auditLog.count({ where: { action: "booking.checkout_started", businessId: DEMO_BUSINESS_ID } });
+
+            const throttled = await postCheckoutHttp(baseUrl, checkoutBody(fixture, quote.holdId), "198.51.100.11");
+            expect(throttled.status).toBe(429);
+            expect(throttled.headers.get("cache-control")).toBe("no-store");
+            expect(throttled.headers.get("retry-after")).toEqual(expect.stringMatching(/^\d+$/));
+            expect(throttled.headers.get("ratelimit-limit")).toBe("1");
+            expect(throttled.headers.get("ratelimit-remaining")).toBe("0");
+            expect(Number(throttled.headers.get("ratelimit-reset"))).toBeLessThanOrEqual(900);
+
+            expect(await prisma.bookingHold.count({ where: { id: quote.holdId } })).toBe(beforeHolds);
+            expect(await prisma.booking.count({ where: { listingId: fixture.listingId } })).toBe(beforeBookings);
+            expect(await prisma.auditLog.count({ where: { action: "booking.checkout_started", businessId: DEMO_BUSINESS_ID } })).toBe(beforeAudits);
+          });
+        } finally {
+          await cleanupListingFixture(fixture.listingId);
+        }
+      }
+    );
+
+    await withEnv(
+      {
+        PUBLIC_CHECKOUT_RATE_LIMIT: "1",
+        PUBLIC_CHECKOUT_RATE_WINDOW_SECONDS: "900",
+        PUBLIC_RATE_LIMIT_MAX_KEYS: "100",
+        ALLOW_MOCK_PAYMENTS: "true",
+        STRIPE_SECRET_KEY: undefined,
+        TRUST_PROXY_HOPS: "1"
+      },
+      async () => {
+        const fixture = await createListingFixture({ capacity: 8 });
+        const quote = await publicApi.quote(quoteBody(fixture));
+
+        try {
+          await withHttpApp(async (baseUrl) => {
+            const first = await postCheckoutHttp(baseUrl, { ...checkoutBody(fixture, quote.holdId), holdId: "hold_missing_trusted_proxy" }, "198.51.100.20");
+            expect(first.status).toBe(400);
+
+            const accepted = await postCheckoutHttp(baseUrl, checkoutBody(fixture, quote.holdId), "198.51.100.21");
+            expect(accepted.status).toBe(201);
+            await expect(accepted.json()).resolves.toMatchObject({ status: "pending_payment", checkoutUrl: expect.stringContaining("/payments/mock/") });
+          });
+        } finally {
+          await cleanupListingFixture(fixture.listingId);
+        }
+      }
+    );
+  });
+
+  it("keeps quote and checkout rate-limit buckets independent", async () => {
+    await withEnv({ PUBLIC_QUOTE_RATE_LIMIT: "1", PUBLIC_CHECKOUT_RATE_LIMIT: "1", PUBLIC_RATE_LIMIT_MAX_KEYS: "100" }, async () => {
+      const quoteLimiter = new PublicQuoteRateLimiter();
+      const checkoutLimiter = new PublicCheckoutRateLimiter();
+      const now = new Date("2026-08-31T00:00:00.000Z");
+
+      expect(quoteLimiter.consume({ source: "198.51.100.50", now }).allowed).toBe(true);
+      expect(quoteLimiter.consume({ source: "198.51.100.50", now }).allowed).toBe(false);
+      expect(checkoutLimiter.consume({ source: "198.51.100.50", now }).allowed).toBe(true);
+      expect(checkoutLimiter.consume({ source: "198.51.100.50", now }).allowed).toBe(false);
     });
   });
 
@@ -217,6 +357,27 @@ describe("quote hold capacity lifecycle", () => {
         await expect(publicApi.quote(body)).rejects.toThrow();
       }
       expect(await prisma.bookingHold.count({ where: { listingId: fixture.listingId } })).toBe(0);
+    } finally {
+      await cleanupListingFixture(fixture.listingId);
+    }
+  });
+
+  it("rejects bounded checkout payload violations before consuming holds", async () => {
+    const fixture = await createListingFixture({ capacity: 8 });
+    const quote = await publicApi.quote(quoteBody(fixture));
+    const invalidBodies = [
+      { ...checkoutBody(fixture, quote.holdId), holdId: "x".repeat(81) },
+      { ...checkoutBody(fixture, quote.holdId), customer: { name: "x".repeat(161), email: "oversized-name@example.invalid" } },
+      { ...checkoutBody(fixture, quote.holdId), customer: { name: "Email Tester", email: `${"x".repeat(245)}@example.invalid` } },
+      { ...checkoutBody(fixture, quote.holdId), customer: { name: "Phone Tester", email: "phone@example.invalid", phone: "x".repeat(41) } }
+    ];
+
+    try {
+      for (const body of invalidBodies) {
+        await expect(publicApi.checkout(body)).rejects.toThrow();
+      }
+      expect(await prisma.bookingHold.count({ where: { id: quote.holdId } })).toBe(1);
+      expect(await prisma.booking.count({ where: { listingId: fixture.listingId } })).toBe(0);
     } finally {
       await cleanupListingFixture(fixture.listingId);
     }
@@ -339,6 +500,34 @@ describe("quote hold capacity lifecycle", () => {
     };
   }
 
+  function checkoutBody(fixture: { listingId: string; date: string; startTime: string }, holdId: string) {
+    return {
+      ...quoteBody(fixture),
+      holdId,
+      customer: { name: "Checkout Tester", email: "checkout-limiter@example.invalid", phone: "+1-555-0101" }
+    };
+  }
+
+  function postCheckoutHttp(baseUrl: string, body: unknown, forwardedFor: string) {
+    return fetch(`${baseUrl}/public/bookings/checkout`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": forwardedFor },
+      body: JSON.stringify(body)
+    });
+  }
+
+  async function withHttpApp<T>(callback: (baseUrl: string) => Promise<T>) {
+    const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, bodyParser: false, logger: false });
+    configureApiHttp(app);
+    await app.listen(0);
+    const address = app.getHttpServer().address() as AddressInfo;
+    try {
+      return await callback(`http://127.0.0.1:${address.port}`);
+    } finally {
+      await app.close();
+    }
+  }
+
   function responseRecorder() {
     const headers: Record<string, string> = {};
     return {
@@ -367,6 +556,17 @@ describe("quote hold capacity lifecycle", () => {
     await prisma.availabilityRule.deleteMany({ where: { listingId } });
     await prisma.addOn.deleteMany({ where: { listingId } });
     await prisma.listing.deleteMany({ where: { id: listingId } });
+  }
+
+  class FakeStripeCheckoutClient {
+    createCheckoutSessionCalls = 0;
+
+    async createCheckoutSession() {
+      this.createCheckoutSessionCalls += 1;
+      return { id: "cs_test_checkout_limiter", url: "https://checkout.stripe.test/session", paymentIntentId: "pi_test_checkout_limiter" };
+    }
+
+    async expireCheckoutSession() {}
   }
 
   async function withEnv<T>(values: Record<string, string | undefined>, callback: () => Promise<T>) {

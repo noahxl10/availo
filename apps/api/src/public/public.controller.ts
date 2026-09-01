@@ -1,12 +1,13 @@
 import { Body, Controller, Get, HttpException, HttpStatus, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
-import { PublicQuoteRateLimiter } from "./public-rate-limit.js";
+import { PublicCheckoutRateLimiter, PublicQuoteRateLimiter, type PublicRateLimitDecision } from "./public-rate-limit.js";
 import { PublicService } from "./public.service.js";
 
 @Controller("public")
 export class PublicController {
   constructor(
     @Inject(PublicService) private readonly publicApi: PublicService,
-    @Inject(PublicQuoteRateLimiter) private readonly quoteRateLimiter: PublicQuoteRateLimiter
+    @Inject(PublicQuoteRateLimiter) private readonly quoteRateLimiter: PublicQuoteRateLimiter,
+    @Inject(PublicCheckoutRateLimiter) private readonly checkoutRateLimiter: PublicCheckoutRateLimiter
   ) {}
 
   @Get("businesses/:slug/listings")
@@ -39,7 +40,16 @@ export class PublicController {
   }
 
   @Post("bookings/checkout")
-  checkout(@Body() body: unknown) {
+  checkout(@Body() body: unknown, @Req() request: RequestLike, @Res({ passthrough: true }) response: ResponseLike) {
+    const rateLimit = this.checkoutRateLimiter.consume({
+      source: clientSource(request)
+    });
+    setRateLimitHeaders(response, rateLimit);
+    if (!rateLimit.allowed) {
+      throw new HttpException({
+        message: "Too many checkout requests. Please try again later."
+      }, HttpStatus.TOO_MANY_REQUESTS);
+    }
     return this.publicApi.checkout(body);
   }
 
@@ -62,7 +72,7 @@ function clientSource(request: RequestLike) {
   return request.ip ?? request.socket?.remoteAddress ?? "unknown";
 }
 
-function setRateLimitHeaders(response: ResponseLike, rateLimit: ReturnType<PublicQuoteRateLimiter["consume"]>) {
+function setRateLimitHeaders(response: ResponseLike, rateLimit: PublicRateLimitDecision) {
   if (rateLimit.disabled) return;
   response.setHeader("Cache-Control", "no-store");
   response.setHeader("RateLimit-Limit", String(rateLimit.limit));

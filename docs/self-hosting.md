@@ -52,6 +52,8 @@ API variables live in `apps/api/.env`.
 | `EXPIRED_RESERVATION_CLEANUP_BATCH_SIZE` | No | Maximum expired holds and pending-payment bookings processed per cleanup run. Defaults to `500`. |
 | `PUBLIC_QUOTE_RATE_LIMIT` | No | Public quote attempts per client IP per window. Defaults to `6`; set `0` only as an emergency rollback to disable the limiter. |
 | `PUBLIC_QUOTE_RATE_WINDOW_SECONDS` | No | Public quote rate-limit window. Defaults to `900`, aligned with the 15-minute hold TTL. |
+| `PUBLIC_CHECKOUT_RATE_LIMIT` | No | Public checkout attempts per client IP per window. Defaults to `12`; set `0` only as an emergency rollback to disable the limiter. |
+| `PUBLIC_CHECKOUT_RATE_WINDOW_SECONDS` | No | Public checkout rate-limit window. Defaults to `900`. |
 | `PUBLIC_RATE_LIMIT_MAX_KEYS` | No | Maximum active in-memory client buckets for public rate limits. Defaults to `10000`. |
 | `PUBLIC_BOOKING_HORIZON_DAYS` | No | Maximum quote date horizon, in days from the API server date. Defaults to `548`. |
 | `TRUST_PROXY_HOPS` | No | Number of trusted reverse-proxy hops for client IP detection. Defaults to `0`, which ignores forwarded IP headers. |
@@ -77,7 +79,7 @@ For production, run the API and dashboard as separate long-running services. Put
 
 Do not deploy with `CORS_ORIGINS="*"`. The API uses credentialed CORS and rejects wildcard origins at startup.
 
-Public quote creation has a small in-process rate limiter for single-node self-hosted installs. It is not shared across multiple API replicas. If active client buckets reach `PUBLIC_RATE_LIMIT_MAX_KEYS`, newly seen clients fail closed with `429` until older buckets expire; raise the cap only when the host has enough memory. If the API runs behind one trusted reverse proxy, set `TRUST_PROXY_HOPS="1"` and configure the proxy to strip client-supplied forwarding headers before adding its own; otherwise leave `TRUST_PROXY_HOPS="0"` so spoofed `X-Forwarded-For` values are ignored.
+Public quote creation and checkout each have a small in-process rate limiter for single-node self-hosted installs. They use separate buckets and are not shared across multiple API replicas. If active client buckets reach `PUBLIC_RATE_LIMIT_MAX_KEYS`, newly seen clients fail closed with `429` until older buckets expire; raise the cap only when the host has enough memory. If the API runs behind one trusted reverse proxy, set `TRUST_PROXY_HOPS="1"` and configure the proxy to strip client-supplied forwarding headers before adding its own; otherwise leave `TRUST_PROXY_HOPS="0"` so spoofed `X-Forwarded-For` values are ignored.
 
 When `STRIPE_SECRET_KEY` is set, public checkout creates a hosted Stripe Checkout session and binds the pending booking to the returned Checkout Session ID, PaymentIntent ID when available, expected amount, and expected currency. Configure Stripe to send events to `POST /payments/stripe/webhook` and set `STRIPE_WEBHOOK_SECRET`; Availo confirms a booking only after a signed successful Stripe event matches the stored provider IDs and money fields. Stripe checkout reservations use a 31-minute payment expiry, aligned with Stripe's minimum custom Checkout Session expiry with a small clock/request buffer.
 

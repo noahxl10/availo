@@ -2,6 +2,8 @@ import { Injectable } from "@nestjs/common";
 
 const DEFAULT_QUOTE_LIMIT = 6;
 const DEFAULT_QUOTE_WINDOW_SECONDS = 15 * 60;
+const DEFAULT_CHECKOUT_LIMIT = 12;
+const DEFAULT_CHECKOUT_WINDOW_SECONDS = 15 * 60;
 const DEFAULT_MAX_BUCKETS = 10_000;
 
 type Bucket = {
@@ -9,7 +11,7 @@ type Bucket = {
   resetAt: number;
 };
 
-export type PublicQuoteRateLimitDecision = {
+export type PublicRateLimitDecision = {
   allowed: boolean;
   disabled: boolean;
   limit: number;
@@ -18,14 +20,16 @@ export type PublicQuoteRateLimitDecision = {
   resetAt: Date;
 };
 
-@Injectable()
-export class PublicQuoteRateLimiter {
+class PublicRateLimiter {
   private readonly buckets = new Map<string, Bucket>();
-  private readonly limit = nonNegativeInt("PUBLIC_QUOTE_RATE_LIMIT", DEFAULT_QUOTE_LIMIT);
-  private readonly windowMs = positiveInt("PUBLIC_QUOTE_RATE_WINDOW_SECONDS", DEFAULT_QUOTE_WINDOW_SECONDS) * 1000;
-  private readonly maxBuckets = positiveInt("PUBLIC_RATE_LIMIT_MAX_KEYS", DEFAULT_MAX_BUCKETS);
 
-  consume(input: { source: string; now?: Date }): PublicQuoteRateLimitDecision {
+  constructor(
+    private readonly limit: number,
+    private readonly windowMs: number,
+    private readonly maxBuckets: number
+  ) {}
+
+  consume(input: { source: string; now?: Date }): PublicRateLimitDecision {
     const now = input.now?.getTime() ?? Date.now();
     if (this.limit === 0) return this.decision(true, now + this.windowMs, Number.POSITIVE_INFINITY, now, true);
     this.cleanup(now);
@@ -59,7 +63,7 @@ export class PublicQuoteRateLimiter {
     }
   }
 
-  private decision(allowed: boolean, resetAt: number, remaining: number, now: number, disabled: boolean): PublicQuoteRateLimitDecision {
+  private decision(allowed: boolean, resetAt: number, remaining: number, now: number, disabled: boolean): PublicRateLimitDecision {
     return {
       allowed,
       disabled,
@@ -68,6 +72,28 @@ export class PublicQuoteRateLimiter {
       retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000)),
       resetAt: new Date(resetAt)
     };
+  }
+}
+
+@Injectable()
+export class PublicQuoteRateLimiter extends PublicRateLimiter {
+  constructor() {
+    super(
+      nonNegativeInt("PUBLIC_QUOTE_RATE_LIMIT", DEFAULT_QUOTE_LIMIT),
+      positiveInt("PUBLIC_QUOTE_RATE_WINDOW_SECONDS", DEFAULT_QUOTE_WINDOW_SECONDS) * 1000,
+      positiveInt("PUBLIC_RATE_LIMIT_MAX_KEYS", DEFAULT_MAX_BUCKETS)
+    );
+  }
+}
+
+@Injectable()
+export class PublicCheckoutRateLimiter extends PublicRateLimiter {
+  constructor() {
+    super(
+      nonNegativeInt("PUBLIC_CHECKOUT_RATE_LIMIT", DEFAULT_CHECKOUT_LIMIT),
+      positiveInt("PUBLIC_CHECKOUT_RATE_WINDOW_SECONDS", DEFAULT_CHECKOUT_WINDOW_SECONDS) * 1000,
+      positiveInt("PUBLIC_RATE_LIMIT_MAX_KEYS", DEFAULT_MAX_BUCKETS)
+    );
   }
 }
 

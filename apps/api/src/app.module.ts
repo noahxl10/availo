@@ -14,10 +14,10 @@ import { PublicService } from "./public/public.service.js";
 import { PaymentController } from "./payments/payment.controller.js";
 import { StripeCheckoutClient } from "./payments/stripe-checkout.js";
 import { PrismaService } from "./prisma/prisma.service.js";
-import { PublicQuoteRateLimiter } from "./public/public-rate-limit.js";
+import { PublicCheckoutRateLimiter, PublicQuoteRateLimiter } from "./public/public-rate-limit.js";
 
 @Module({
   controllers: [AuthController, BusinessController, DashboardController, ListingController, BookingController, PublicController, PaymentController],
-  providers: [PrismaService, DashboardService, ListingService, BookingService, PublicService, PublicQuoteRateLimiter, StripeCheckoutClient, OperatorAuthGuard, OperatorRolesGuard]
+  providers: [PrismaService, DashboardService, ListingService, BookingService, PublicService, PublicQuoteRateLimiter, PublicCheckoutRateLimiter, StripeCheckoutClient, OperatorAuthGuard, OperatorRolesGuard]
 })
 export class AppModule {}

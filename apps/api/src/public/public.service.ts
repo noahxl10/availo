@@ -21,11 +21,11 @@ const quoteInput = quoteInputBase.extend({
 }).superRefine(rejectDuplicateAddOns);
 
 const checkoutInput = quoteInputBase.extend({
-  holdId: z.string().min(1),
+  holdId: z.string().min(1).max(80),
   customer: z.object({
-    name: z.string().min(1),
-    email: z.string().email(),
-    phone: z.string().optional()
+    name: z.string().min(1).max(160),
+    email: z.string().email().max(254),
+    phone: z.string().min(3).max(40).optional()
   })
 }).superRefine(rejectDuplicateAddOns);
 

@@ -45,7 +45,7 @@ Open `http://localhost:3000`. The API runs on `http://localhost:4000`.
 
 For local checkout demos, set `ALLOW_MOCK_PAYMENTS="true"` in `apps/api/.env`. For real checkout, set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`; Availo confirms Stripe bookings only after a signed webhook matches the booking's stored provider IDs, amount, and currency. Keep mock payments false or unset outside local demo and test environments, and schedule expired-reservation cleanup so stale Stripe Checkout Sessions are closed.
 
-Public quote creation is rate limited per client IP by default for small self-hosted installs. See `docs/self-hosting.md` before changing `PUBLIC_QUOTE_RATE_LIMIT` or enabling proxy IP trust with `TRUST_PROXY_HOPS`.
+Public quote creation and checkout are rate limited per client IP by default for small self-hosted installs. See `docs/self-hosting.md` before changing public rate-limit settings or enabling proxy IP trust with `TRUST_PROXY_HOPS`.
 
 ### First-run behavior
 
