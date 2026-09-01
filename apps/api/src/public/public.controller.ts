@@ -20,6 +20,11 @@ export class PublicController {
     return this.publicApi.availability(id, date);
   }
 
+  @Get("widget")
+  widget(@Query("listingId") listingId?: string, @Query("businessSlug") businessSlug?: string, @Query("days") days?: string) {
+    return this.publicApi.widget({ listingId, businessSlug, days });
+  }
+
   @Post("bookings/quote")
   quote(@Body() body: unknown) {
     return this.publicApi.quote(body);

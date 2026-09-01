@@ -63,6 +63,30 @@ describe("dashboard and public API contracts", () => {
     expect(response.listings[0]).not.toHaveProperty("internalNotes");
   });
 
+  it("returns a bounded public-safe widget payload", async () => {
+    const response = await publicApi.widget({ businessSlug: DEMO_BUSINESS_SLUG, days: "2" });
+
+    expect(response.listing).toMatchObject({
+      id: "lst_harbor_kayak_tour",
+      title: "Harbor Kayak Tour",
+      business: { name: "Sample Tours Co.", slug: DEMO_BUSINESS_SLUG, currency: "USD" }
+    });
+    expect(response.availability).toHaveLength(2);
+    expect(response.availability[0]).toEqual(expect.objectContaining({
+      date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      slots: expect.any(Array)
+    }));
+    expect(JSON.stringify(response)).not.toContain("capacityRemaining");
+    expect(JSON.stringify(response)).not.toContain("capacity\":");
+    expect(JSON.stringify(response)).not.toContain("businessId");
+    expect(JSON.stringify(response)).not.toContain("taxRateBps");
+    expect(JSON.stringify(response)).not.toContain("ownerUserId");
+    expect(JSON.stringify(response)).not.toContain("pricingType");
+
+    await expect(publicApi.widget({ businessSlug: DEMO_BUSINESS_SLUG, days: "8" })).rejects.toThrow();
+    await expect(publicApi.widget({ listingId: "lst_harbor_kayak_tour", businessSlug: "wrong-slug" })).rejects.toThrow("Listing not found");
+  });
+
   it("logs in, rotates refresh sessions, and logs out", async () => {
     await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
 

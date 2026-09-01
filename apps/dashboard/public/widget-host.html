@@ -103,7 +103,7 @@
       <section class="host-copy">
         <h1>Host Site Booking Embed</h1>
         <p>This page intentionally uses loud global CSS to verify that the embedded Availo widget keeps its own typography, colors, radii, and button styles.</p>
-        <div class="host-note">The widget below should still render with DM Sans, #1e8f88 accent controls, rounded cards, and clean compact behavior on mobile.</div>
+        <div class="host-note">The widget below should read its listing and availability from the local API while keeping its isolated visual style.</div>
       </section>
 
       <section class="mobile-widget-copy">
@@ -112,7 +112,7 @@
       </section>
 
       <section aria-label="Availo booking widget">
-        <div data-availo-widget></div>
+        <div data-availo-widget data-api-base-url="http://localhost:4000" data-business-slug="sample-tours"></div>
       </section>
     </main>
 

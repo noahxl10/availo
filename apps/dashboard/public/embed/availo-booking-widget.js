@@ -1,18 +1,6 @@
 (function () {
-  const MOCK_LISTING = {
-    title: "Harbor Kayak Tour",
-    business: "Sample Tours Co.",
-    duration: "1 hour",
-    basePrice: 65,
-    childPrice: 45,
-    dates: [5, 6, 7, 9, 10, 11, 12, 13, 14, 15],
-    slots: ["9:30 AM", "11:00 AM", "12:30 PM", "2:00 PM", "3:30 PM", "5:00 PM"],
-    addons: [
-      { id: "adult", title: "Adult", description: "Ages 13+", price: 65 },
-      { id: "child", title: "Child", description: "Ages 6 - 12", price: 45 },
-      { id: "free-child", title: "Free Child", description: "5 yrs and under", price: 0 },
-    ],
-  };
+  const DEFAULT_LISTING_ID = "lst_harbor_kayak_tour";
+  const DEFAULT_LOOKAHEAD_DAYS = 7;
 
   const styles = `
     @import url("https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap");
@@ -22,7 +10,6 @@
       --av-accent-hover: #177870;
       --av-accent-soft: #eef7f6;
       --av-accent-mid: #2ea69f;
-      --av-accent-wash: #cceae7;
       --av-bg: #f8f8f7;
       --av-surface: #ffffff;
       --av-border: #e4e2de;
@@ -44,18 +31,8 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    *, *::before, *::after {
-      box-sizing: border-box;
-    }
-
-    button,
-    input {
-      font: inherit;
-    }
-
-    button {
-      appearance: none;
-    }
+    *, *::before, *::after { box-sizing: border-box; }
+    button { appearance: none; font: inherit; }
 
     .widget {
       overflow: hidden;
@@ -83,9 +60,7 @@
     }
 
     :host([compact]) .header,
-    .widget[data-compact="true"] .header {
-      padding: 16px 18px;
-    }
+    .widget[data-compact="true"] .header { padding: 16px 18px; }
 
     .title {
       color: #ffffff;
@@ -95,42 +70,18 @@
     }
 
     :host([compact]) .title,
-    .widget[data-compact="true"] .title {
-      font-size: 13px;
-    }
+    .widget[data-compact="true"] .title { font-size: 13px; }
 
     .subtitle {
       margin-top: 2px;
-      color: rgba(255,255,255,0.5);
+      color: rgba(255,255,255,0.58);
       font-size: 11px;
       line-height: 1.4;
     }
 
-    .dots {
-      display: flex;
-      flex-shrink: 0;
-      gap: 4px;
-    }
-
-    .dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.2);
-    }
-
-    .dot[data-active="true"] {
-      background: var(--av-accent-mid);
-    }
-
-    .body {
-      padding: 20px 24px;
-    }
-
+    .body { padding: 20px 24px; }
     :host([compact]) .body,
-    .widget[data-compact="true"] .body {
-      padding: 16px 18px;
-    }
+    .widget[data-compact="true"] .body { padding: 16px 18px; }
 
     .eyebrow {
       margin-bottom: 12px;
@@ -163,7 +114,7 @@
       transition: background-color 0.1s ease, border-color 0.1s ease, color 0.1s ease, box-shadow 0.1s ease;
     }
 
-    .chip:hover {
+    .chip:hover:not(:disabled) {
       border-color: var(--av-neutral-300);
       background: var(--av-bg);
     }
@@ -184,6 +135,23 @@
       color: var(--av-accent-hover);
     }
 
+    .notice {
+      margin: 0;
+      padding: 12px 14px;
+      border: 1px solid var(--av-border);
+      border-radius: 10px;
+      background: var(--av-bg);
+      color: var(--av-neutral-600);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .notice[data-tone="error"] {
+      border-color: #efb4a0;
+      background: #fff4ee;
+      color: #8c321d;
+    }
+
     .guest-list {
       overflow: hidden;
       border: 1px solid var(--av-border);
@@ -199,9 +167,7 @@
       border-bottom: 1px solid var(--av-neutral-100);
     }
 
-    .guest-row:last-child {
-      border-bottom: 0;
-    }
+    .guest-row:last-child { border-bottom: 0; }
 
     .guest-copy {
       flex: 1;
@@ -289,33 +255,13 @@
       background: var(--av-accent-soft);
     }
 
-    .addon-icon {
-      display: flex;
-      width: 36px;
-      height: 36px;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      border-radius: 8px;
-      background: var(--av-neutral-100);
-      color: var(--av-subtle);
-      font-weight: 700;
-    }
-
-    .addon[data-selected="true"] .addon-icon {
-      background: var(--av-accent-wash);
-      color: var(--av-accent-hover);
-    }
-
     .addon-copy {
       flex: 1;
       min-width: 0;
     }
 
     .addon-copy strong,
-    .addon-copy span {
-      display: block;
-    }
+    .addon-copy span { display: block; }
 
     .addon-copy strong {
       color: var(--av-text);
@@ -333,10 +279,6 @@
       color: var(--av-neutral-600);
       font-size: 14px;
       font-weight: 700;
-    }
-
-    .addon[data-selected="true"] .addon-price {
-      color: var(--av-accent);
     }
 
     .check {
@@ -374,9 +316,7 @@
       font-size: 12px;
     }
 
-    .summary-row:last-child {
-      margin-bottom: 0;
-    }
+    .summary-row:last-child { margin-bottom: 0; }
 
     .summary-row strong {
       color: var(--av-text);
@@ -393,28 +333,6 @@
     .summary-row[data-total="true"] strong {
       color: var(--av-accent);
       font-size: 14px;
-    }
-
-    .field {
-      width: 100%;
-      min-height: 44px;
-      margin-bottom: 8px;
-      padding: 9px 12px;
-      border: 1.5px solid var(--av-border);
-      border-radius: 8px;
-      outline: none;
-      background: var(--av-surface);
-      color: var(--av-text);
-      font-size: 12px;
-    }
-
-    .field::placeholder {
-      color: var(--av-subtle);
-    }
-
-    .field:focus {
-      border-color: var(--av-accent-mid);
-      box-shadow: 0 0 0 2px var(--av-accent-soft);
     }
 
     .actions {
@@ -467,116 +385,29 @@
       color: var(--av-text);
     }
 
-    .confirm {
-      text-align: center;
-    }
-
-    .confirm-icon {
-      display: flex;
-      width: 48px;
-      height: 48px;
-      align-items: center;
-      justify-content: center;
-      margin: 0 auto 14px;
-      border-radius: 999px;
-      background: var(--av-accent-soft);
-      color: var(--av-accent);
-      font-size: 24px;
-      font-weight: 700;
-    }
-
-    .confirm h3 {
-      margin: 0 0 6px;
-      color: var(--av-text);
-      font-size: 17px;
-      font-weight: 700;
-      line-height: 1.2;
-    }
-
-    .confirm p {
-      margin: 0 0 16px;
-      color: var(--av-muted);
-      font-size: 12px;
-      line-height: 1.5;
-    }
-
     @media (max-width: 420px) {
-      :host {
-        max-width: 100%;
-      }
-
+      :host { max-width: 100%; }
       .widget {
         border-radius: 14px;
         box-shadow: 0 4px 20px rgba(0,0,0,0.1);
       }
-
-      .header {
-        padding: 16px 18px;
-      }
-
-      .title {
-        font-size: 13px;
-      }
-
-      .body {
-        padding: 16px 18px;
-      }
-
-      .chip-grid {
-        gap: 6px;
-      }
-
-      .chip {
-        flex: 1 1 calc(33.333% - 6px);
-        padding-right: 8px;
-        padding-left: 8px;
-      }
-
-      .chip--time {
-        flex-basis: calc(50% - 6px);
-      }
-
+      .header,
+      .body { padding: 16px 18px; }
+      .title { font-size: 13px; }
+      .chip { flex: 1 1 calc(33.333% - 6px); }
+      .chip--time { flex-basis: calc(50% - 6px); }
       .guest-row {
         gap: 10px;
         padding: 12px 14px;
       }
-
-      .stepper {
-        gap: 8px;
-      }
-
       .addon {
         display: grid;
-        grid-template-columns: 36px minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto auto;
         gap: 10px;
         padding: 12px;
       }
-
-      .addon-price {
-        grid-column: 2;
-        font-size: 13px;
-      }
-
-      .check {
-        grid-column: 3;
-        grid-row: 1;
-      }
-
-      .summary-row {
-        gap: 8px;
-      }
-
-      .summary-row strong {
-        max-width: 68%;
-      }
-
-      .actions {
-        flex-direction: column;
-      }
-
-      .action {
-        width: 100%;
-      }
+      .actions { flex-direction: column; }
+      .action { width: 100%; }
     }
   `;
 
@@ -586,27 +417,74 @@
       this.attachShadow({ mode: "open" });
       this.state = {
         step: 0,
-        date: 8,
-        slot: "9:00 AM",
-        guests: { adults: 2, children: 1 },
-        addons: new Set(["wetsuit"]),
-        name: "",
-        email: "",
+        status: "loading",
+        error: "",
+        listing: null,
+        dates: [],
+        slots: [],
+        date: "",
+        slot: "",
+        guests: { adults: 1, children: 0 },
+        addons: new Set()
       };
     }
 
     connectedCallback() {
       this.render();
+      void this.load();
     }
 
     get compact() {
       return this.hasAttribute("compact");
     }
 
-    get total() {
-      const guests = this.state.guests.adults * MOCK_LISTING.basePrice + this.state.guests.children * MOCK_LISTING.childPrice;
-      const addons = MOCK_LISTING.addons.reduce((sum, addon) => sum + (this.state.addons.has(addon.id) ? addon.price : 0), 0);
-      return guests + addons;
+    get listingId() {
+      return this.getAttribute("listing-id") || this.getAttribute("data-listing") || DEFAULT_LISTING_ID;
+    }
+
+    get businessSlug() {
+      return this.getAttribute("business-slug") || this.getAttribute("data-business-slug") || "";
+    }
+
+    get apiBaseUrl() {
+      const configured = this.getAttribute("api-base-url") || scriptDataset().apiBaseUrl || "";
+      if (configured) return configured.replace(/\/$/, "");
+      const scriptSrc = document.currentScript?.src ? new URL(document.currentScript.src, window.location.href) : null;
+      return (scriptSrc?.origin || window.location.origin).replace(/\/$/, "");
+    }
+
+    async load() {
+      try {
+        const payload = await this.loadWidgetPayload();
+        const listing = normalizeListing(payload.listing);
+        const dates = normalizeWidgetAvailability(payload.availability);
+        const firstDate = dates[0];
+        this.setState({
+          status: "ready",
+          listing,
+          dates,
+          slots: firstDate?.slots ?? [],
+          date: firstDate?.date ?? "",
+          slot: firstDate?.slots[0]?.startTime ?? "",
+          guests: { adults: Math.max(listing.minGuests, 1), children: 0 }
+        });
+      } catch (error) {
+        this.setState({ status: "error", error: messageFor(error, "Booking is unavailable right now.") });
+      }
+    }
+
+    async loadWidgetPayload() {
+      const params = new URLSearchParams({ days: String(DEFAULT_LOOKAHEAD_DAYS) });
+      if (this.hasAttribute("listing-id") || this.hasAttribute("data-listing")) params.set("listingId", this.listingId);
+      if (this.businessSlug) params.set("businessSlug", this.businessSlug);
+      else params.set("listingId", this.listingId);
+      return this.request(`/public/widget?${params.toString()}`);
+    }
+
+    async request(path) {
+      const response = await fetch(`${this.apiBaseUrl}${path}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`Availo API returned ${response.status}`);
+      return response.json();
     }
 
     setState(nextState) {
@@ -614,34 +492,34 @@
       this.render();
     }
 
+    selectDate(date) {
+      const selected = this.state.dates.find((item) => item.date === date);
+      this.setState({ date, slots: selected?.slots ?? [], slot: selected?.slots[0]?.startTime ?? "" });
+    }
+
     updateGuest(type, direction) {
-      const limits = type === "adults" ? { min: 1, max: 10 } : { min: 0, max: 8 };
-      const value = this.state.guests[type] + direction;
-      this.setState({
-        guests: {
-          ...this.state.guests,
-          [type]: Math.max(limits.min, Math.min(limits.max, value)),
-        },
-      });
+      const listing = this.state.listing;
+      if (!listing) return;
+      const nextGuests = { ...this.state.guests, [type]: this.state.guests[type] + direction };
+      const total = nextGuests.adults + nextGuests.children;
+      if (nextGuests.adults < 1 || nextGuests.children < 0 || total < listing.minGuests || total > listing.maxGuests) return;
+      this.setState({ guests: nextGuests });
     }
 
     toggleAddon(id) {
       const addons = new Set(this.state.addons);
-      if (addons.has(id)) {
-        addons.delete(id);
-      } else {
-        addons.add(id);
-      }
+      if (addons.has(id)) addons.delete(id);
+      else addons.add(id);
       this.setState({ addons });
     }
 
     bindEvents() {
       this.shadowRoot.querySelectorAll("[data-step]").forEach((button) => {
-        button.addEventListener("click", () => this.setState({ step: Number(button.dataset.step) }));
+        button.addEventListener("click", () => this.setState({ step: Number(button.dataset.step), error: "" }));
       });
 
       this.shadowRoot.querySelectorAll("[data-date]").forEach((button) => {
-        button.addEventListener("click", () => this.setState({ date: Number(button.dataset.date) }));
+        button.addEventListener("click", () => this.selectDate(button.dataset.date));
       });
 
       this.shadowRoot.querySelectorAll("[data-slot]").forEach((button) => {
@@ -655,75 +533,61 @@
       this.shadowRoot.querySelectorAll("[data-addon]").forEach((button) => {
         button.addEventListener("click", () => this.toggleAddon(button.dataset.addon));
       });
-
-      this.shadowRoot.querySelectorAll("[data-field]").forEach((input) => {
-        input.addEventListener("input", () => {
-          this.state = { ...this.state, [input.dataset.field]: input.value };
-        });
-      });
-
-      const confirm = this.shadowRoot.querySelector("[data-confirm]");
-      if (confirm) {
-        confirm.addEventListener("click", () => this.setState({ step: 4 }));
-      }
     }
 
     render() {
-      const stepNames = ["Select Date", "Guests", "Add-ons", "Checkout", "Confirmed"];
+      const listing = this.state.listing;
       this.shadowRoot.innerHTML = `
         <style>${styles}</style>
         <div class="widget" data-compact="${this.compact}">
           <div class="header">
             <div>
-              <div class="title">${MOCK_LISTING.title}</div>
-              <div class="subtitle">${MOCK_LISTING.business} - ${MOCK_LISTING.duration} - from $${MOCK_LISTING.basePrice}</div>
-            </div>
-            <div class="dots" aria-label="Booking progress">
-              ${stepNames.map((_, index) => `<span class="dot" data-active="${this.state.step === index}"></span>`).join("")}
+              <div class="title">${this.escape(listing?.title ?? "Book this experience")}</div>
+              <div class="subtitle">${this.escape(listing?.business?.name ?? "Availo")} - ${this.escape(listing ? formatDuration(listing.durationMinutes) : "Availability")} - ${this.escape(listing ? `from ${money(listing.basePriceCents, listing.business.currency)}` : "loading")}</div>
             </div>
           </div>
-          <div class="body">
-            ${this.renderStep()}
-          </div>
+          <div class="body">${this.renderStep()}</div>
         </div>
       `;
       this.bindEvents();
     }
 
     renderStep() {
+      if (this.state.status === "loading") return `<p class="notice">Loading live availability.</p>`;
+      if (this.state.status === "error") return `<p class="notice" data-tone="error">${this.escape(this.state.error)}</p>`;
+      if (!this.state.listing) return `<p class="notice" data-tone="error">Booking is unavailable right now.</p>`;
       if (this.state.step === 0) return this.renderDateStep();
       if (this.state.step === 1) return this.renderGuestsStep();
       if (this.state.step === 2) return this.renderAddonsStep();
-      if (this.state.step === 3) return this.renderCheckoutStep();
-      return this.renderConfirmationStep();
+      return this.renderSummaryStep();
     }
 
     renderDateStep() {
       return `
         <div>
           <div class="eyebrow">Select Date</div>
-          <div class="chip-grid">
-            ${MOCK_LISTING.dates.map((date) => `
-              <button class="chip" data-date="${date}" data-selected="${this.state.date === date}" type="button">May ${date}</button>
-            `).join("")}
-          </div>
-          <div class="eyebrow">Time</div>
-          <div class="chip-grid" style="margin-bottom:20px">
-            ${MOCK_LISTING.slots.map((slot) => `
-              <button class="chip chip--time" data-slot="${slot}" data-selected="${this.state.slot === slot}" type="button">${slot}</button>
-            `).join("")}
-          </div>
-          <div class="actions">
-            <button class="action action--primary" data-step="1" type="button">Next: Guests</button>
-          </div>
+          ${this.state.dates.length ? `
+            <div class="chip-grid">
+              ${this.state.dates.map((date) => `<button class="chip" data-date="${this.escape(date.date)}" data-selected="${this.state.date === date.date}" type="button">${this.escape(shortDate(date.date))}</button>`).join("")}
+            </div>
+            <div class="eyebrow">Time</div>
+            <div class="chip-grid" style="margin-bottom:20px">
+              ${this.state.slots.map((slot) => `<button class="chip chip--time" data-slot="${this.escape(slot.startTime)}" data-selected="${this.state.slot === slot.startTime}" type="button">${this.escape(slot.startTime)}</button>`).join("")}
+            </div>
+            <div class="actions">
+              <button class="action action--primary" data-step="1" type="button">Next: Guests</button>
+            </div>
+          ` : `<p class="notice">No available times are published yet.</p>`}
         </div>
       `;
     }
 
     renderGuestsStep() {
+      const listing = this.state.listing;
+      const totalGuests = this.state.guests.adults + this.state.guests.children;
       const rows = [
-        { type: "adults", label: "Adults", sub: "Ages 13+", price: MOCK_LISTING.basePrice, min: 1, max: 10 },
-        { type: "children", label: "Children", sub: "Ages 3-12", price: MOCK_LISTING.childPrice, min: 0, max: 8 },
+        { type: "adults", label: "Adults", sub: "Ages 13+", price: listing.basePriceCents, min: 1 },
+        { type: "children", label: "Children", sub: "Ages 3-12", price: listing.childPriceCents ?? listing.basePriceCents, min: 0 }
       ];
 
       return `
@@ -734,12 +598,12 @@
               <div class="guest-row">
                 <div class="guest-copy">
                   <strong>${row.label}</strong>
-                  <span>${row.sub} - $${row.price}</span>
+                  <span>${row.sub} - ${money(row.price, listing.business.currency)}</span>
                 </div>
                 <div class="stepper">
                   <button data-guest="${row.type}" data-delta="-1" ${this.state.guests[row.type] <= row.min ? "disabled" : ""} type="button">-</button>
                   <span>${this.state.guests[row.type]}</span>
-                  <button data-plus="true" data-guest="${row.type}" data-delta="1" ${this.state.guests[row.type] >= row.max ? "disabled" : ""} type="button">+</button>
+                  <button data-plus="true" data-guest="${row.type}" data-delta="1" ${totalGuests >= listing.maxGuests ? "disabled" : ""} type="button">+</button>
                 </div>
               </div>
             `).join("")}
@@ -753,70 +617,62 @@
     }
 
     renderAddonsStep() {
+      const listing = this.state.listing;
       return `
         <div>
           <div class="eyebrow">Add-ons</div>
-          <div class="addon-list">
-            ${MOCK_LISTING.addons.map((addon) => `
-              <button class="addon" data-addon="${addon.id}" data-selected="${this.state.addons.has(addon.id)}" type="button">
-                <span class="addon-icon">+</span>
-                <span class="addon-copy">
-                  <strong>${addon.title}</strong>
-                  <span>${addon.description}</span>
-                </span>
-                <span class="addon-price">+$${addon.price}</span>
-                <span class="check">${this.state.addons.has(addon.id) ? "✓" : ""}</span>
-              </button>
-            `).join("")}
-          </div>
+          ${listing.addOns.length ? `
+            <div class="addon-list">
+              ${listing.addOns.map((addon) => `
+                <button class="addon" data-addon="${this.escape(addon.id)}" data-selected="${this.state.addons.has(addon.id)}" type="button">
+                  <span class="addon-copy">
+                    <strong>${this.escape(addon.name)}</strong>
+                    <span>${this.escape(addon.description ?? quantityLabel(addon))}</span>
+                  </span>
+                  <span class="addon-price">+${this.escape(money(addon.priceCents, listing.business.currency))}</span>
+                  <span class="check">${this.state.addons.has(addon.id) ? "x" : ""}</span>
+                </button>
+              `).join("")}
+            </div>
+          ` : `<p class="notice">No add-ons are available for this booking.</p>`}
           <div class="actions">
             <button class="action action--secondary" data-step="1" type="button">Back</button>
-            <button class="action action--primary" data-step="3" type="button">Next: Checkout</button>
+            <button class="action action--primary" data-step="3" type="button">Review</button>
           </div>
         </div>
       `;
     }
 
-    renderCheckoutStep() {
+    renderSummaryStep() {
       return `
         <div>
-          <div class="eyebrow">Checkout</div>
-          ${this.renderSummary()}
-          <input class="field" data-field="name" placeholder="Full name" value="${this.escape(this.state.name)}" autocomplete="name" />
-          <input class="field" data-field="email" placeholder="Email address" value="${this.escape(this.state.email)}" autocomplete="email" />
+          <div class="eyebrow">Booking Summary</div>
+          <div class="summary">
+            <div class="summary-row"><span>Date</span><strong>${this.escape(formatDate(this.state.date))}</strong></div>
+            <div class="summary-row"><span>Time</span><strong>${this.escape(this.state.slot)}</strong></div>
+            <div class="summary-row"><span>Guests</span><strong>${this.state.guests.adults} adults, ${this.state.guests.children} children</strong></div>
+            <div class="summary-row"><span>Add-ons</span><strong>${this.escape(this.selectedAddOnNames())}</strong></div>
+            <div class="summary-row" data-total="true"><span>Estimated total</span><strong>${this.escape(this.totalLabel())}</strong></div>
+          </div>
+          <p class="notice">Live checkout is handled by the Availo public API after the operator enables this widget for bookings.</p>
           <div class="actions">
             <button class="action action--secondary" data-step="2" type="button">Back</button>
-            <button class="action action--primary" data-confirm type="button">Book Now - $${this.total}</button>
+            <button class="action action--primary" data-step="0" type="button">Choose Another Time</button>
           </div>
         </div>
       `;
     }
 
-    renderConfirmationStep() {
-      return `
-        <div class="confirm">
-          <div class="confirm-icon">✓</div>
-          <h3>Booking Confirmed</h3>
-          <p>Your ${MOCK_LISTING.title} is reserved for May ${this.state.date}, 2026 at ${this.state.slot}. A confirmation email has been sent.</p>
-          ${this.renderSummary()}
-          <div class="actions">
-            <button class="action action--primary" data-step="0" type="button">Book Another Time</button>
-          </div>
-        </div>
-      `;
+    selectedAddOnNames() {
+      const names = this.state.listing.addOns.filter((addon) => this.state.addons.has(addon.id)).map((addon) => addon.name);
+      return names.length ? names.join(", ") : "None";
     }
 
-    renderSummary() {
-      const selectedAddons = MOCK_LISTING.addons.filter((addon) => this.state.addons.has(addon.id));
-      return `
-        <div class="summary">
-          <div class="summary-row"><span>Date</span><strong>May ${this.state.date}, 2026</strong></div>
-          <div class="summary-row"><span>Time</span><strong>${this.state.slot}</strong></div>
-          <div class="summary-row"><span>Guests</span><strong>${this.state.guests.adults} adults, ${this.state.guests.children} children</strong></div>
-          <div class="summary-row"><span>Add-ons</span><strong>${selectedAddons.length ? selectedAddons.map((addon) => addon.title).join(", ") : "None"}</strong></div>
-          <div class="summary-row" data-total="true"><span>Total</span><strong>$${this.total}</strong></div>
-        </div>
-      `;
+    totalLabel() {
+      const listing = this.state.listing;
+      const guestTotal = this.state.guests.adults * listing.basePriceCents + this.state.guests.children * (listing.childPriceCents ?? listing.basePriceCents);
+      const addOnTotal = listing.addOns.reduce((sum, addon) => sum + (this.state.addons.has(addon.id) ? addon.priceCents : 0), 0);
+      return money(guestTotal + addOnTotal, listing.business.currency);
     }
 
     escape(value) {
@@ -828,6 +684,102 @@
     }
   }
 
+  function normalizeListing(payload) {
+    if (!payload || typeof payload !== "object") throw new Error("Invalid listing");
+    if (!payload.business || typeof payload.business !== "object") throw new Error("Invalid business");
+    return {
+      id: stringField(payload.id),
+      title: stringField(payload.title),
+      durationMinutes: numberField(payload.durationMinutes),
+      basePriceCents: numberField(payload.basePriceCents),
+      childPriceCents: payload.childPriceCents === null || payload.childPriceCents === undefined ? null : numberField(payload.childPriceCents),
+      minGuests: numberField(payload.minGuests),
+      maxGuests: numberField(payload.maxGuests),
+      business: {
+        name: stringField(payload.business.name),
+        currency: stringField(payload.business.currency || "USD")
+      },
+      addOns: Array.isArray(payload.addOns) ? payload.addOns.map((addOn) => ({
+        id: stringField(addOn.id),
+        name: stringField(addOn.name),
+        description: addOn.description === null || addOn.description === undefined ? null : stringField(addOn.description),
+        priceCents: numberField(addOn.priceCents),
+        minQuantity: numberField(addOn.minQuantity ?? 0),
+        maxQuantity: numberField(addOn.maxQuantity ?? 1)
+      })) : []
+    };
+  }
+
+  function normalizeWidgetAvailability(payload) {
+    if (!Array.isArray(payload)) throw new Error("Invalid availability");
+    return payload.map((day) => {
+      if (!day || typeof day !== "object" || !Array.isArray(day.slots)) throw new Error("Invalid availability");
+      return {
+        date: stringField(day.date),
+        slots: day.slots
+          .map((slot) => ({
+            startTime: stringField(slot.startTime),
+            available: booleanField(slot.available)
+          }))
+          .filter((slot) => slot.available)
+      };
+    }).filter((day) => day.slots.length > 0);
+  }
+
+  function stringField(value) {
+    if (typeof value !== "string") throw new Error("Invalid API field");
+    return value;
+  }
+
+  function numberField(value) {
+    if (!Number.isFinite(value)) throw new Error("Invalid API field");
+    return value;
+  }
+
+  function booleanField(value) {
+    if (typeof value !== "boolean") throw new Error("Invalid API field");
+    return value;
+  }
+
+  function money(cents, currency) {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(cents / 100);
+  }
+
+  function formatDuration(minutes) {
+    if (minutes % 60 === 0) return `${minutes / 60} hour${minutes === 60 ? "" : "s"}`;
+    return `${minutes} min`;
+  }
+
+  function shortDate(date) {
+    return new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  function formatDate(date) {
+    if (!date) return "Select a date";
+    return new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+  }
+
+  function quantityLabel(addOn) {
+    if (addOn.maxQuantity > 1) return `Up to ${addOn.maxQuantity}`;
+    return "Optional";
+  }
+
+  function messageFor(error, fallback) {
+    if (error instanceof Error && error.message.includes("429")) return "Too many booking attempts. Please try again later.";
+    return fallback;
+  }
+
+  function scriptDataset() {
+    return document.currentScript?.dataset ?? {};
+  }
+
+  window.AvailoBookingWidgetTestHooks = {
+    normalizeListing,
+    normalizeWidgetAvailability,
+    shortDate,
+    money
+  };
+
   if (!customElements.get("availo-booking-widget")) {
     customElements.define("availo-booking-widget", AvailoBookingWidget);
   }
@@ -835,9 +787,10 @@
   document.querySelectorAll("[data-availo-widget]").forEach((mount) => {
     if (mount.querySelector("availo-booking-widget")) return;
     const widget = document.createElement("availo-booking-widget");
-    if (mount.dataset.compact === "true") {
-      widget.setAttribute("compact", "");
-    }
+    if (mount.dataset.compact === "true") widget.setAttribute("compact", "");
+    if (mount.dataset.apiBaseUrl) widget.setAttribute("api-base-url", mount.dataset.apiBaseUrl);
+    if (mount.dataset.listingId) widget.setAttribute("listing-id", mount.dataset.listingId);
+    if (mount.dataset.businessSlug) widget.setAttribute("business-slug", mount.dataset.businessSlug);
     mount.appendChild(widget);
   });
 })();

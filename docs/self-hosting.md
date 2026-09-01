@@ -56,6 +56,14 @@ Dashboard variables live in `apps/dashboard/.env.local`.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `NEXT_PUBLIC_API_BASE_URL` | Yes | Browser-visible API base URL. |
+| `NEXT_PUBLIC_APP_BASE_URL` | Recommended | Browser-visible dashboard URL used to generate absolute booking-widget script snippets. Defaults to `http://localhost:3000`. |
+| `NEXT_PUBLIC_WIDGET_SCRIPT_URL` | No | Override for the absolute widget script URL if serving `availo-booking-widget.js` from a CDN or separate asset host. |
+
+## Embeddable widget
+
+The dashboard embed screen generates a copy-paste snippet with `data-api-base-url`, `data-business-slug`, `data-listing-id`, and an absolute widget script URL. Set `NEXT_PUBLIC_API_BASE_URL` and `NEXT_PUBLIC_APP_BASE_URL` to the externally reachable HTTPS origins before giving that snippet to operators.
+
+The widget hydrates from `GET /public/widget`, which returns one bounded, public-safe payload for the selected listing and up to 7 days of availability. Widget availability exposes only whether a slot is available, not exact remaining capacity.
 
 ## Production build
 

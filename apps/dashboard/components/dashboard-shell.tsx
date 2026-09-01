@@ -168,7 +168,7 @@ export function DashboardShell() {
         {activeNav === "booking" && <BookingDetail booking={primaryBooking} listing={primaryListing} />}
         {activeNav === "availability" && <AvailabilityManager overview={overview} />}
         {activeNav === "customers" && <CustomersManager bookings={overview.bookings} />}
-        {activeNav === "embed" && <EmbedSetup businessName={businessName} listing={primaryListing} />}
+        {activeNav === "embed" && <EmbedSetup businessName={businessName} businessSlug={overview.business?.slug ?? "sample-tours"} listing={primaryListing} />}
         {activeNav === "analytics" && <AnalyticsManager overview={overview} />}
       </main>
 
@@ -563,13 +563,16 @@ function BookingDetail({ booking, listing }: { booking: DashboardOverview["booki
   );
 }
 
-function EmbedSetup({ businessName, listing }: { businessName: string; listing: DashboardOverview["listings"][number] }) {
-  const [theme, setTheme] = useState("light");
+function EmbedSetup({ businessName, businessSlug, listing }: { businessName: string; businessSlug: string; listing: DashboardOverview["listings"][number] }) {
+  const listingId = listing.id ?? "lst_harbor_kayak_tour";
+  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+  const dashboardBaseUrl = process.env.NEXT_PUBLIC_APP_BASE_URL ?? process.env.APP_BASE_URL ?? "http://localhost:3000";
+  const widgetScriptUrl = process.env.NEXT_PUBLIC_WIDGET_SCRIPT_URL ?? `${dashboardBaseUrl.replace(/\/$/, "")}/embed/availo-booking-widget.js`;
   return (
     <div className="embed-grid">
       <div className="detail-stack">
-        <Card><h2 className="panel-title">Configuration</h2><FormRow label="Listing"><Select defaultValue="boot-hill"><option value="boot-hill">{listing.title}</option><option>Family Bundle</option></Select></FormRow><FormRow label="Theme"><div className="theme-picker">{["light", "dark", "auto"].map((t) => <button key={t} data-active={theme === t} onClick={() => setTheme(t)} type="button">{t}</button>)}</div></FormRow></Card>
-        <Card><h2 className="panel-title">Embed Code</h2><pre className="code-block">{`<script\n  src="https://cdn.availo.io/widget.js"\n  data-key="ak_live_rdw_307016"\n  data-listing="boot-hill-tour"\n  data-theme="${theme}"\n></script>`}</pre><Button type="button">Copy Code</Button></Card>
+        <Card><h2 className="panel-title">Configuration</h2><FormRow label="Listing"><Select defaultValue={listingId}><option value={listingId}>{listing.title}</option></Select></FormRow></Card>
+        <Card><h2 className="panel-title">Embed Code</h2><pre className="code-block">{`<div\n  data-availo-widget\n  data-api-base-url="${apiBaseUrl}"\n  data-business-slug="${businessSlug}"\n  data-listing-id="${listingId}"\n></div>\n<script src="${widgetScriptUrl}"></script>`}</pre><Button type="button">Copy Code</Button></Card>
       </div>
       <div><div className="preview-label">Widget Preview</div><div className="widget-preview"><div className="browser-label">yourwebsite.com — embedded widget</div><BookingWidget businessName={businessName} listing={listing} /></div></div>
     </div>

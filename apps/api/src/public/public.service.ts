@@ -22,6 +22,12 @@ const checkoutInput = quoteInput.extend({
   })
 });
 
+const widgetInput = z.object({
+  listingId: z.string().min(1).optional(),
+  businessSlug: z.string().min(1).optional(),
+  days: z.coerce.number().int().min(1).max(7).default(7)
+}).refine((input) => Boolean(input.listingId || input.businessSlug), "listingId or businessSlug is required");
+
 @Injectable()
 export class PublicService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
@@ -79,6 +85,71 @@ export class PublicService {
       return { id: `${id}_${date}_${time}`, listingId: id, date, startTime: time, capacityRemaining: Math.max(capacity - booked - held, 0) };
     });
     return { date, slots };
+  }
+
+  async widget(body: unknown) {
+    const input = parse(widgetInput, body);
+    let listing;
+    if (input.listingId) {
+      listing = await this.prisma.listing.findFirst({
+        where: {
+          id: input.listingId,
+          status: "active",
+          ...(input.businessSlug ? { business: { is: { slug: input.businessSlug } } } : {})
+        },
+        include: { business: true, addOns: { where: { status: "active" } } }
+      });
+    } else {
+      if (!input.businessSlug) throw new BadRequestException("listingId or businessSlug is required");
+      listing = await this.prisma.listing.findFirst({
+        where: { status: "active", business: { is: { slug: input.businessSlug } } },
+        include: { business: true, addOns: { where: { status: "active" } } },
+        orderBy: { createdAt: "asc" }
+      });
+    }
+    if (!listing) throw new NotFoundException("Listing not found");
+
+    const availability = [];
+    for (let offset = 0; offset < input.days; offset += 1) {
+      const date = isoDateAfterDays(offset);
+      const day = await this.availability(listing.id, date);
+      availability.push({
+        date,
+        slots: day.slots.map((slot) => ({
+          startTime: slot.startTime,
+          available: slot.capacityRemaining > 0
+        }))
+      });
+    }
+
+    return {
+      listing: {
+        id: listing.id,
+        title: listing.title,
+        description: listing.description,
+        category: listing.category,
+        basePriceCents: listing.basePriceCents,
+        childPriceCents: listing.childPriceCents,
+        durationMinutes: listing.durationMinutes,
+        minGuests: listing.minGuests,
+        maxGuests: listing.maxGuests,
+        meetingPoint: listing.meetingPoint,
+        business: {
+          name: listing.business.name,
+          slug: listing.business.slug,
+          currency: listing.business.currency
+        },
+        addOns: listing.addOns.map((addOn) => ({
+          id: addOn.id,
+          name: addOn.name,
+          description: addOn.description,
+          priceCents: addOn.priceCents,
+          minQuantity: addOn.minQuantity,
+          maxQuantity: addOn.maxQuantity
+        }))
+      },
+      availability
+    };
   }
 
   async quote(body: unknown) {
@@ -303,6 +374,12 @@ function fromMinutes(value: number) {
 
 function addMinutes(time: string, increment: number) {
   return fromMinutes(minutes(time) + increment);
+}
+
+function isoDateAfterDays(offset: number) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + offset);
+  return date.toISOString().slice(0, 10);
 }
 
 function subtotal(
