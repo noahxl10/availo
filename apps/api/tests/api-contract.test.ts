@@ -504,7 +504,9 @@ describe("dashboard and public API contracts", () => {
   });
 
   it("rejects listing updates that would invert guest limits", async () => {
-    await expect(listingService.update("lst_harbor_kayak_tour", { minGuests: 99 })).rejects.toThrow("minGuests cannot be greater than maxGuests");
+    await expect(
+      listingService.update({ userId: "usr_demo_owner", businessId: DEMO_BUSINESS_ID, role: "owner" }, "lst_harbor_kayak_tour", { minGuests: 99 })
+    ).rejects.toThrow("minGuests cannot be greater than maxGuests");
   });
 
   async function createPendingBooking(customerEmail: string) {

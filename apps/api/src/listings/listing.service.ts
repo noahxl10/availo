@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { z } from "zod";
+import type { AuthenticatedActor } from "../auth/auth-context.js";
 import { prefixedId } from "../common/ids.js";
-import { DEMO_BUSINESS_ID } from "../common/tenant.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const listingInput = z.object({
@@ -22,30 +22,30 @@ const listingInput = z.object({
 export class ListingService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
-  list() {
+  list(businessId: string) {
     return this.prisma.listing.findMany({
-      where: { businessId: DEMO_BUSINESS_ID, status: { not: "archived" } },
+      where: { businessId, status: { not: "archived" } },
       include: { addOns: true, rules: true, exceptions: true },
       orderBy: { createdAt: "asc" }
     });
   }
 
-  async get(id: string) {
+  async get(businessId: string, id: string) {
     const listing = await this.prisma.listing.findFirst({
-      where: { id, businessId: DEMO_BUSINESS_ID },
+      where: { id, businessId },
       include: { addOns: true, rules: true, exceptions: true }
     });
     if (!listing) throw new NotFoundException("Listing not found");
     return listing;
   }
 
-  async create(body: unknown) {
+  async create(actor: AuthenticatedActor, body: unknown) {
     const input = this.parseCreate(body);
     return this.prisma.$transaction(async (tx) => {
       const listing = await tx.listing.create({
         data: {
           id: prefixedId("lst"),
-          businessId: DEMO_BUSINESS_ID,
+          businessId: actor.businessId,
           title: input.title,
           description: input.description ?? null,
           category: input.category,
@@ -63,7 +63,8 @@ export class ListingService {
       await tx.auditLog.create({
         data: {
           id: prefixedId("aud"),
-          businessId: DEMO_BUSINESS_ID,
+          businessId: actor.businessId,
+          userId: actor.userId,
           action: "listing.created",
           entityType: "listing",
           entityId: listing.id
@@ -73,18 +74,19 @@ export class ListingService {
     });
   }
 
-  async update(id: string, body: unknown) {
-    const current = await this.get(id);
+  async update(actor: AuthenticatedActor, id: string, body: unknown) {
+    const current = await this.get(actor.businessId, id);
     const input = cleanUndefined(this.parseUpdate(body, current));
     return this.prisma.$transaction(async (tx) => {
       const listing = await tx.listing.update({
-        where: { id },
+        where: { id, businessId: actor.businessId },
         data: input
       });
       await tx.auditLog.create({
         data: {
           id: prefixedId("aud"),
-          businessId: DEMO_BUSINESS_ID,
+          businessId: actor.businessId,
+          userId: actor.userId,
           action: "listing.updated",
           entityType: "listing",
           entityId: listing.id
@@ -94,9 +96,22 @@ export class ListingService {
     });
   }
 
-  async archive(id: string) {
-    await this.get(id);
-    return this.prisma.listing.update({ where: { id }, data: { status: "archived" } });
+  async archive(actor: AuthenticatedActor, id: string) {
+    await this.get(actor.businessId, id);
+    return this.prisma.$transaction(async (tx) => {
+      const listing = await tx.listing.update({ where: { id, businessId: actor.businessId }, data: { status: "archived" } });
+      await tx.auditLog.create({
+        data: {
+          id: prefixedId("aud"),
+          businessId: actor.businessId,
+          userId: actor.userId,
+          action: "listing.archived",
+          entityType: "listing",
+          entityId: listing.id
+        }
+      });
+      return listing;
+    });
   }
 
   private parseCreate(body: unknown) {

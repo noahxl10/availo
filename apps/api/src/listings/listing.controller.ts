@@ -1,32 +1,39 @@
-import { Body, Controller, Delete, Get, Inject, Param, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import { CurrentActor, type AuthenticatedActor } from "../auth/auth-context.js";
+import { OperatorAuthGuard } from "../auth/operator-auth.guard.js";
+import { OperatorRolesGuard, RequireOperatorRoles } from "../auth/operator-roles.guard.js";
 import { ListingService } from "./listing.service.js";
 
 @Controller("listings")
+@UseGuards(OperatorAuthGuard, OperatorRolesGuard)
 export class ListingController {
   constructor(@Inject(ListingService) private readonly listings: ListingService) {}
 
   @Get()
-  list() {
-    return this.listings.list();
+  list(@CurrentActor() actor: AuthenticatedActor) {
+    return this.listings.list(actor.businessId);
   }
 
   @Post()
-  create(@Body() body: unknown) {
-    return this.listings.create(body);
+  @RequireOperatorRoles("owner", "admin", "staff")
+  create(@CurrentActor() actor: AuthenticatedActor, @Body() body: unknown) {
+    return this.listings.create(actor, body);
   }
 
   @Get(":id")
-  get(@Param("id") id: string) {
-    return this.listings.get(id);
+  get(@CurrentActor() actor: AuthenticatedActor, @Param("id") id: string) {
+    return this.listings.get(actor.businessId, id);
   }
 
   @Patch(":id")
-  update(@Param("id") id: string, @Body() body: unknown) {
-    return this.listings.update(id, body);
+  @RequireOperatorRoles("owner", "admin", "staff")
+  update(@CurrentActor() actor: AuthenticatedActor, @Param("id") id: string, @Body() body: unknown) {
+    return this.listings.update(actor, id, body);
   }
 
   @Delete(":id")
-  archive(@Param("id") id: string) {
-    return this.listings.archive(id);
+  @RequireOperatorRoles("owner", "admin", "staff")
+  archive(@CurrentActor() actor: AuthenticatedActor, @Param("id") id: string) {
+    return this.listings.archive(actor, id);
   }
 }

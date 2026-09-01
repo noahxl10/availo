@@ -434,6 +434,8 @@ select: {
    - staff can manage bookings/listings
    - viewer is read-only
 
+Operator `/listings` APIs require a verified access token. Listing list/read routes allow all active operator roles for the authenticated tenant; create, update, and archive require owner, admin, or staff. Cross-tenant listing IDs return the same generic `404` as missing listings.
+
 ## Phase 14: SQLite Now, Neon Later
 
 Design Prisma so migration to Postgres is easy:
