@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import argon2 from "argon2";
 import { createHmac } from "node:crypto";
 import { AuthController } from "../src/auth/auth.controller.js";
+import { AuthLoginIdentityRateLimiter, AuthLoginIpRateLimiter, AuthRefreshIpRateLimiter, AuthRefreshSessionRateLimiter } from "../src/auth/auth-rate-limit.js";
 import { DEMO_BUSINESS_ID, DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
 import { prefixedId } from "../src/common/ids.js";
 import { DashboardService } from "../src/dashboard/dashboard.service.js";
@@ -12,7 +13,7 @@ import { PrismaService } from "../src/prisma/prisma.service.js";
 
 describe("dashboard and public API contracts", () => {
   const prisma = new PrismaService();
-  const auth = new AuthController(prisma);
+  const auth = createAuthController();
   const dashboard = new DashboardService(prisma);
   const payments = new PaymentController(prisma);
   const publicApi = new PublicService(prisma);
@@ -65,15 +66,19 @@ describe("dashboard and public API contracts", () => {
     expect(response.listings[0]).not.toHaveProperty("internalNotes");
   });
 
-  it("logs in, rotates refresh sessions, and logs out", async () => {
+  it("requires a tenant-scoped active operator login and rotates direct-lookup refresh tokens", async () => {
     await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
 
     await withEnv({ JWT_ACCESS_SECRET: "api-contract-auth-secret" }, async () => {
-      const login = await auth.login({ email: "owner@example-tours.invalid", password: "local-password" });
+      await expect(auth.login({ email: "owner@example-tours.invalid", password: "local-password" })).rejects.toThrow("Bad Request");
+      await expect(auth.login({ businessSlug: DEMO_BUSINESS_SLUG, email: "owner@example-tours.invalid", password: "local-password", extra: true })).rejects.toThrow("Bad Request");
+
+      const login = await auth.login({ businessSlug: DEMO_BUSINESS_SLUG, email: "owner@example-tours.invalid", password: "local-password" });
       expect(login.ok).toBe(true);
       if (!("refreshToken" in login)) throw new Error("Expected successful login");
       expect(login.accessToken).toEqual(expect.any(String));
-      expect(login.refreshToken).toEqual(expect.any(String));
+      expect(login.refreshToken).toMatch(/^v1\.ses_[a-f0-9]{32}\.[A-Za-z0-9_-]{43}$/);
+      expect(await prisma.auditLog.count({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: "auth.login" } })).toBe(1);
 
       await prisma.session.create({
         data: {
@@ -89,16 +94,115 @@ describe("dashboard and public API contracts", () => {
       expect(refresh.ok).toBe(true);
       if (!("refreshToken" in refresh)) throw new Error("Expected successful refresh");
       expect(refresh.refreshToken).not.toBe(login.refreshToken);
+      expect(refresh.refreshToken).toMatch(/^v1\.ses_[a-f0-9]{32}\.[A-Za-z0-9_-]{43}$/);
 
       const revoked = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: { not: null } } });
       expect(revoked).toBe(1);
+      expect(await prisma.auditLog.count({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: "auth.refresh" } })).toBe(1);
 
       const logout = await auth.logout({ refreshToken: refresh.refreshToken });
       expect(logout.ok).toBe(true);
       const activeSessions = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } });
       expect(activeSessions).toBe(1);
+      expect(await prisma.auditLog.count({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: "auth.logout" } })).toBe(1);
       await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+      await prisma.auditLog.deleteMany({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: { in: ["auth.login", "auth.refresh", "auth.logout"] } } });
     });
+  });
+
+  it("revokes active operator sessions when a rotated refresh token is replayed", async () => {
+    await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+
+    await withEnv({ JWT_ACCESS_SECRET: "api-contract-auth-secret" }, async () => {
+      const login = await auth.login({ businessSlug: DEMO_BUSINESS_SLUG, email: "owner@example-tours.invalid", password: "local-password" });
+      if (!("refreshToken" in login)) throw new Error("Expected successful login");
+
+      const refresh = await auth.refresh({ refreshToken: login.refreshToken });
+      if (!("refreshToken" in refresh)) throw new Error("Expected successful refresh");
+      expect(await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } })).toBe(1);
+
+      await expect(auth.refresh({ refreshToken: login.refreshToken })).resolves.toEqual({ ok: false, error: "Invalid refresh token" });
+      expect(await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } })).toBe(0);
+      expect(await prisma.auditLog.count({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: "auth.refresh_reuse_revoked" } })).toBe(1);
+
+      await expect(auth.refresh({ refreshToken: refresh.refreshToken })).resolves.toEqual({ ok: false, error: "Invalid refresh token" });
+      await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+      await prisma.auditLog.deleteMany({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: { in: ["auth.login", "auth.refresh", "auth.refresh_reuse_revoked"] } } });
+    });
+  });
+
+  it("revokes successor sessions when refresh token rotation races", async () => {
+    await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+
+    await withEnv({ JWT_ACCESS_SECRET: "api-contract-auth-secret" }, async () => {
+      const login = await auth.login({ businessSlug: DEMO_BUSINESS_SLUG, email: "owner@example-tours.invalid", password: "local-password" });
+      if (!("refreshToken" in login)) throw new Error("Expected successful login");
+
+      const results = await Promise.all([auth.refresh({ refreshToken: login.refreshToken }), auth.refresh({ refreshToken: login.refreshToken })]);
+      expect(results.filter((result) => result.ok).length).toBe(1);
+      expect(results.filter((result) => !result.ok).length).toBe(1);
+      expect(await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } })).toBe(0);
+      expect(await prisma.auditLog.count({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: "auth.refresh_reuse_revoked" } })).toBe(1);
+
+      await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+      await prisma.auditLog.deleteMany({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: { in: ["auth.login", "auth.refresh", "auth.refresh_reuse_revoked"] } } });
+    });
+  });
+
+  it("rejects logins for a different tenant or a disabled operator", async () => {
+    const businessId = prefixedId("biz");
+    const businessSlug = `auth-${businessId.replace("_", "-")}`;
+    const activeUserId = prefixedId("usr");
+    const disabledUserId = prefixedId("usr");
+    await prisma.business.create({ data: { id: businessId, name: "Auth isolation fixture", slug: businessSlug, status: "active" } });
+    await prisma.user.createMany({
+      data: [
+        { id: activeUserId, businessId, email: "other-tenant-owner@example.invalid", passwordHash: await argon2.hash("local-password"), role: "owner", status: "active" },
+        { id: disabledUserId, businessId, email: "disabled-operator@example.invalid", passwordHash: await argon2.hash("local-password"), role: "owner", status: "disabled" }
+      ]
+    });
+
+    try {
+      await withEnv({ JWT_ACCESS_SECRET: "api-contract-auth-secret" }, async () => {
+        await expect(auth.login({ businessSlug: DEMO_BUSINESS_SLUG, email: "other-tenant-owner@example.invalid", password: "local-password" })).resolves.toEqual({ ok: false, error: "Invalid credentials" });
+        await expect(auth.login({ businessSlug, email: "disabled-operator@example.invalid", password: "local-password" })).resolves.toEqual({ ok: false, error: "Invalid credentials" });
+        await prisma.business.update({ where: { id: businessId }, data: { status: "suspended" } });
+        await expect(auth.login({ businessSlug, email: "other-tenant-owner@example.invalid", password: "local-password" })).resolves.toEqual({ ok: false, error: "Invalid credentials" });
+      });
+    } finally {
+      await prisma.auditLog.deleteMany({ where: { businessId } });
+      await prisma.session.deleteMany({ where: { businessId } });
+      await prisma.user.deleteMany({ where: { businessId } });
+      await prisma.business.deleteMany({ where: { id: businessId } });
+    }
+  });
+
+  it("rate limits login and refresh before expensive credential verification", async () => {
+    await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+
+    await withEnv(
+      {
+        JWT_ACCESS_SECRET: "api-contract-auth-secret",
+        AUTH_LOGIN_IP_RATE_LIMIT: "1",
+        AUTH_LOGIN_IDENTITY_RATE_LIMIT: "1",
+        AUTH_REFRESH_IP_RATE_LIMIT: "1",
+        AUTH_REFRESH_SESSION_RATE_LIMIT: "1",
+        AUTH_RATE_LIMIT_WINDOW_SECONDS: "900",
+        AUTH_RATE_LIMIT_MAX_KEYS: "100"
+      },
+      async () => {
+        const limitedAuth = createAuthController();
+        await expect(limitedAuth.login({ businessSlug: DEMO_BUSINESS_SLUG, email: "owner@example-tours.invalid", password: "wrong-password" })).resolves.toEqual({
+          ok: false,
+          error: "Invalid credentials"
+        });
+        await expect(limitedAuth.login({ businessSlug: DEMO_BUSINESS_SLUG, email: "owner@example-tours.invalid", password: "local-password" })).rejects.toThrow("Too many login attempts");
+
+        const refreshToken = `v1.${prefixedId("ses")}.${"a".repeat(43)}`;
+        await expect(limitedAuth.refresh({ refreshToken })).resolves.toEqual({ ok: false, error: "Invalid refresh token" });
+        await expect(limitedAuth.refresh({ refreshToken })).rejects.toThrow("Too many refresh attempts");
+      }
+    );
   });
 
   it("creates a capacity hold and checkout keeps booking pending until payment confirmation", async () => {
@@ -505,7 +609,7 @@ describe("dashboard and public API contracts", () => {
 
   it("rejects listing updates that would invert guest limits", async () => {
     await expect(
-      listingService.update({ userId: "usr_demo_owner", businessId: DEMO_BUSINESS_ID, role: "owner" }, "lst_harbor_kayak_tour", { minGuests: 99 })
+      listingService.update({ userId: "usr_demo_owner", businessId: DEMO_BUSINESS_ID, role: "owner", sessionId: "ses_direct_service_test" }, "lst_harbor_kayak_tour", { minGuests: 99 })
     ).rejects.toThrow("minGuests cannot be greater than maxGuests");
   });
 
@@ -593,6 +697,16 @@ describe("dashboard and public API contracts", () => {
     const date = new Date();
     date.setUTCDate(date.getUTCDate() + days);
     return date.toISOString().slice(0, 10);
+  }
+
+  function createAuthController() {
+    return new AuthController(
+      prisma,
+      new AuthLoginIpRateLimiter(),
+      new AuthLoginIdentityRateLimiter(),
+      new AuthRefreshIpRateLimiter(),
+      new AuthRefreshSessionRateLimiter()
+    );
   }
 
   class FakeStripeCheckoutClient {

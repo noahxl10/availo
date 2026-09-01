@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { AuthController } from "./auth/auth.controller.js";
+import { AuthLoginIdentityRateLimiter, AuthLoginIpRateLimiter, AuthRefreshIpRateLimiter, AuthRefreshSessionRateLimiter } from "./auth/auth-rate-limit.js";
 import { OperatorAuthGuard } from "./auth/operator-auth.guard.js";
 import { OperatorRolesGuard } from "./auth/operator-roles.guard.js";
 import { BusinessController } from "./businesses/business.controller.js";
@@ -18,6 +19,21 @@ import { PublicCheckoutRateLimiter, PublicQuoteRateLimiter } from "./public/publ
 
 @Module({
   controllers: [AuthController, BusinessController, DashboardController, ListingController, BookingController, PublicController, PaymentController],
-  providers: [PrismaService, DashboardService, ListingService, BookingService, PublicService, PublicQuoteRateLimiter, PublicCheckoutRateLimiter, StripeCheckoutClient, OperatorAuthGuard, OperatorRolesGuard]
+  providers: [
+    PrismaService,
+    DashboardService,
+    ListingService,
+    BookingService,
+    PublicService,
+    PublicQuoteRateLimiter,
+    PublicCheckoutRateLimiter,
+    AuthLoginIpRateLimiter,
+    AuthLoginIdentityRateLimiter,
+    AuthRefreshIpRateLimiter,
+    AuthRefreshSessionRateLimiter,
+    StripeCheckoutClient,
+    OperatorAuthGuard,
+    OperatorRolesGuard
+  ]
 })
 export class AppModule {}

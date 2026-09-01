@@ -43,13 +43,18 @@ API variables live in `apps/api/.env`.
 | --- | --- | --- |
 | `DATABASE_URL` | Yes | Prisma database URL. Defaults to `file:./dev.db` for SQLite. |
 | `JWT_ACCESS_SECRET` | Yes | Secret used to sign short-lived access tokens. Use a long random value. |
-| `JWT_REFRESH_SECRET` | Reserved | Reserved for signed refresh-token workflows. Current refresh tokens are opaque database-backed credentials. |
 | `APP_BASE_URL` | Yes | Public dashboard URL. Also used as the default CORS origin. |
 | `API_BASE_URL` | Yes | Public API URL used for generated checkout links. |
 | `CORS_ORIGINS` | Recommended | Comma-separated list of dashboard origins allowed to call the API. |
 | `PORT` | No | API port. Defaults to `4000`. |
 | `API_BODY_LIMIT` | No | Maximum parsed JSON and URL-encoded request body size. Defaults to `256kb`. |
 | `EXPIRED_RESERVATION_CLEANUP_BATCH_SIZE` | No | Maximum expired holds and pending-payment bookings processed per cleanup run. Defaults to `500`. |
+| `AUTH_LOGIN_IP_RATE_LIMIT` | No | Email login attempts per client IP per auth window. Defaults to `30`; set `0` only as an emergency rollback to disable this limiter. |
+| `AUTH_LOGIN_IDENTITY_RATE_LIMIT` | No | Email login attempts per business slug and email per auth window. Defaults to `8`; set `0` only as an emergency rollback to disable this limiter. |
+| `AUTH_REFRESH_IP_RATE_LIMIT` | No | Refresh attempts per client IP per auth window. Defaults to `60`; set `0` only as an emergency rollback to disable this limiter. |
+| `AUTH_REFRESH_SESSION_RATE_LIMIT` | No | Refresh attempts per named session per auth window. Defaults to `12`; set `0` only as an emergency rollback to disable this limiter. |
+| `AUTH_RATE_LIMIT_WINDOW_SECONDS` | No | Auth rate-limit window. Defaults to `900`. |
+| `AUTH_RATE_LIMIT_MAX_KEYS` | No | Maximum active in-memory client and identity buckets for auth rate limits. Defaults to `10000`. |
 | `PUBLIC_QUOTE_RATE_LIMIT` | No | Public quote attempts per client IP per window. Defaults to `6`; set `0` only as an emergency rollback to disable the limiter. |
 | `PUBLIC_QUOTE_RATE_WINDOW_SECONDS` | No | Public quote rate-limit window. Defaults to `900`, aligned with the 15-minute hold TTL. |
 | `PUBLIC_CHECKOUT_RATE_LIMIT` | No | Public checkout attempts per client IP per window. Defaults to `12`; set `0` only as an emergency rollback to disable the limiter. |
@@ -81,11 +86,19 @@ Do not deploy with `CORS_ORIGINS="*"`. The API uses credentialed CORS and reject
 
 Public quote creation and checkout each have a small in-process rate limiter for single-node self-hosted installs. They use separate buckets and are not shared across multiple API replicas. If active client buckets reach `PUBLIC_RATE_LIMIT_MAX_KEYS`, newly seen clients fail closed with `429` until older buckets expire; raise the cap only when the host has enough memory. If the API runs behind one trusted reverse proxy, set `TRUST_PROXY_HOPS="1"` and configure the proxy to strip client-supplied forwarding headers before adding its own; otherwise leave `TRUST_PROXY_HOPS="0"` so spoofed `X-Forwarded-For` values are ignored.
 
+Email login and refresh endpoints also use in-process IP plus identity/session rate limits before password or refresh-token verification. These auth buckets are single-node only and are not shared across API replicas; use a reverse proxy or deployment-level limiter before running multiple API nodes.
+
 When `STRIPE_SECRET_KEY` is set, public checkout creates a hosted Stripe Checkout session and binds the pending booking to the returned Checkout Session ID, PaymentIntent ID when available, expected amount, and expected currency. Configure Stripe to send events to `POST /payments/stripe/webhook` and set `STRIPE_WEBHOOK_SECRET`; Availo confirms a booking only after a signed successful Stripe event matches the stored provider IDs and money fields. Stripe checkout reservations use a 31-minute payment expiry, aligned with Stripe's minimum custom Checkout Session expiry with a small clock/request buffer.
 
 Mock checkout is intentionally local-only and is ignored when `STRIPE_SECRET_KEY` is configured. Keep `ALLOW_MOCK_PAYMENTS` false or unset in production.
 
 Refund requests also fail closed until Availo has an authenticated refund provider flow.
+
+## Operator authentication
+
+Seeded installs include the demo owner user for local evaluation. Operator email login is tenant-scoped: `POST /auth/email/login` requires `businessSlug`, `email`, and `password`, and it authenticates only active users in an active matching business. The old demo-bound email registration route is not exposed; first-business onboarding should use a deliberate bootstrap flow when one is implemented.
+
+Access tokens are bound to their issuing session, so logout, refresh rotation, refresh-token reuse, or session expiry invalidates protected operator API access for that token. Refresh tokens are opaque database-backed credentials in the form `v1.<sessionId>.<secret>`. Only the secret portion is hashed in the `Session` row. Refresh rotates the named session once; reuse of a rotated token revokes active sessions for that operator and business and requires a fresh login. Logout revokes the named session.
 
 ## Database notes
 

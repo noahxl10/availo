@@ -40,10 +40,13 @@ describe("authenticated operator booking reads", () => {
         await expect(
           getBookings(baseUrl, jwt.sign({ sub: "usr_demo_owner", businessId: DEMO_BUSINESS_ID, role: "owner", exp: Math.floor(Date.now() / 1000) - 60 }, jwtSecret))
         ).resolves.toMatchObject({ status: 401 });
-        await expect(getBookings(baseUrl, signToken(disabledUser.id, DEMO_BUSINESS_ID))).resolves.toMatchObject({ status: 401 });
-        await expect(getBookings(baseUrl, signToken("usr_demo_owner", "biz_other_operator"))).resolves.toMatchObject({ status: 401 });
+        await expect(getBookings(baseUrl, await signToken(disabledUser.id, DEMO_BUSINESS_ID))).resolves.toMatchObject({ status: 401 });
+        await expect(
+          getBookings(baseUrl, jwt.sign({ sub: "usr_demo_owner", businessId: "biz_other_operator", role: "owner", sid: prefixedId("ses") }, jwtSecret, { expiresIn: "15m" }))
+        ).resolves.toMatchObject({ status: 401 });
       });
     } finally {
+      await prisma.session.deleteMany({ where: { userId: disabledUser.id } });
       await prisma.user.deleteMany({ where: { id: disabledUser.id } });
     }
   });
@@ -54,7 +57,7 @@ describe("authenticated operator booking reads", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const firstPageResponse = await getBookings(baseUrl, signToken(fixture.userId, fixture.businessId), "?limit=2");
+        const firstPageResponse = await getBookings(baseUrl, await signToken(fixture.userId, fixture.businessId), "?limit=2");
         expect(firstPageResponse.status).toBe(200);
         const firstPage = (await firstPageResponse.json()) as BookingPage;
 
@@ -63,7 +66,7 @@ describe("authenticated operator booking reads", () => {
         expect(JSON.stringify(firstPage)).not.toContain(otherFixture.businessId);
         expect(firstPage.nextCursor).toEqual(expect.any(String));
 
-        const secondPageResponse = await getBookings(baseUrl, signToken(fixture.userId, fixture.businessId), `?limit=2&cursor=${encodeURIComponent(firstPage.nextCursor ?? "")}`);
+        const secondPageResponse = await getBookings(baseUrl, await signToken(fixture.userId, fixture.businessId), `?limit=2&cursor=${encodeURIComponent(firstPage.nextCursor ?? "")}`);
         expect(secondPageResponse.status).toBe(200);
         const secondPage = (await secondPageResponse.json()) as BookingPage;
 
@@ -87,7 +90,7 @@ describe("authenticated operator booking reads", () => {
       }
 
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         const firstPageResponse = await getBookings(baseUrl, token, "?limit=1");
         expect(firstPageResponse.status).toBe(200);
         const firstPage = (await firstPageResponse.json()) as BookingPage;
@@ -116,7 +119,7 @@ describe("authenticated operator booking reads", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         await expect(getBookings(baseUrl, token, "?limit=0")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?limit=101")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?limit=not-a-number")).resolves.toMatchObject({ status: 400 });
@@ -137,7 +140,7 @@ describe("authenticated operator booking reads", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         const ownBooking = await getBooking(baseUrl, fixture.bookingIds[0]!, token);
         expect(ownBooking.status).toBe(200);
         await expect(ownBooking.json()).resolves.toMatchObject({ id: fixture.bookingIds[0]!, businessId: fixture.businessId });
@@ -182,8 +185,12 @@ describe("authenticated operator booking reads", () => {
     return fetch(`${baseUrl}/bookings/${id}`, { headers: { authorization: `Bearer ${accessToken}` } });
   }
 
-  function signToken(userId: string, businessId: string) {
-    return jwt.sign({ sub: userId, businessId, role: "owner" }, jwtSecret, { expiresIn: "15m" });
+  async function signToken(userId: string, businessId: string) {
+    const sessionId = prefixedId("ses");
+    await prisma.session.create({
+      data: { id: sessionId, userId, businessId, refreshTokenHash: "access-token-test-session", expiresAt: new Date(Date.now() + 60_000) }
+    });
+    return jwt.sign({ sub: userId, businessId, role: "owner", sid: sessionId }, jwtSecret, { expiresIn: "15m" });
   }
 
   async function createBookingReadFixture(slugSeed: string, bookingCount: number) {

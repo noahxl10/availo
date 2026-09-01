@@ -49,7 +49,11 @@ Public quote creation and checkout are rate limited per client IP by default for
 
 ### First-run behavior
 
-The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL` and requires an operator access token for live overview data; if authentication or the API is unavailable, it shows an explicit status instead of substituting mock data.
+The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL` and requires an operator access token for live overview data; if authentication or the API is unavailable, it shows an explicit status instead of substituting mock data. Email login is tenant-scoped: `POST /auth/email/login` requires strict `{ "businessSlug", "email", "password" }` input and authenticates only active users in an active matching business. The demo-bound registration route is intentionally unavailable; use an explicit onboarding flow when one is implemented.
+
+Access tokens are bound to the session that issued them. Refresh tokens use the opaque `v1.<sessionId>.<secret>` form. They rotate once on `POST /auth/refresh`; reuse of a rotated token revokes active sessions for that operator and requires a fresh login. `POST /auth/logout` revokes the named session and invalidates its access token. Send the access token as a Bearer token to `GET /auth/me`, which returns only the authenticated actor's `userId`, `businessId`, and `role`.
+
+Public auth endpoints have in-process rate limits before password or refresh-token verification. See `docs/self-hosting.md` before changing `AUTH_*_RATE_LIMIT` settings.
 
 The current admin experience is intentionally simple while Availo moves toward a full tenant-authenticated operator dashboard. Treat public availability, checkout capacity, sessions, CORS, and payment confirmation as the highest-risk areas when contributing.
 
@@ -59,7 +63,7 @@ See [docs/self-hosting.md](docs/self-hosting.md) for production-oriented setup n
 
 For a public install, set at least:
 
-- `apps/api/.env`: `APP_BASE_URL`, `API_BASE_URL`, `CORS_ORIGINS`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, and `DATABASE_URL`.
+- `apps/api/.env`: `APP_BASE_URL`, `API_BASE_URL`, `CORS_ORIGINS`, `JWT_ACCESS_SECRET`, and `DATABASE_URL`.
 - `apps/dashboard/.env.local`: `NEXT_PUBLIC_API_BASE_URL`.
 
 Run the production build with:

@@ -6,6 +6,7 @@ export type AuthenticatedActor = {
   userId: string;
   businessId: string;
   role: string;
+  sessionId: string;
 };
 
 export type ActorRequest = {
@@ -16,7 +17,8 @@ export type ActorRequest = {
 const accessTokenClaims = z.object({
   sub: z.string().min(1),
   businessId: z.string().min(1),
-  role: z.string().min(1)
+  role: z.string().min(1),
+  sid: z.string().min(1)
 });
 
 export const CurrentActor = createParamDecorator((_data: unknown, context: ExecutionContext) => {
@@ -36,7 +38,7 @@ export function parseBearerActor(authorization: string | undefined): Authenticat
   const secret = jwtAccessSecret();
   try {
     const claims = accessTokenClaims.parse(jwt.verify(token, secret));
-    return { userId: claims.sub, businessId: claims.businessId, role: claims.role };
+    return { userId: claims.sub, businessId: claims.businessId, role: claims.role, sessionId: claims.sid };
   } catch {
     throw new UnauthorizedException("Invalid access token");
   }

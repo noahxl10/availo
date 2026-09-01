@@ -9,15 +9,31 @@ export class OperatorAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest<ActorRequest>();
     const actor = parseBearerActor(request.headers.authorization);
-    const user = await this.prisma.user.findUnique({
-      where: { id: actor.userId },
-      select: { businessId: true, role: true, status: true }
+    const session = await this.prisma.session.findUnique({
+      where: { id: actor.sessionId },
+      select: {
+        userId: true,
+        businessId: true,
+        revokedAt: true,
+        expiresAt: true,
+        user: { select: { businessId: true, role: true, status: true } },
+        business: { select: { status: true } }
+      }
     });
-    if (!user || user.status !== "active" || user.businessId !== actor.businessId) {
+    if (
+      !session ||
+      session.userId !== actor.userId ||
+      session.businessId !== actor.businessId ||
+      session.revokedAt ||
+      session.expiresAt <= new Date() ||
+      session.user.status !== "active" ||
+      session.user.businessId !== actor.businessId ||
+      session.business.status !== "active"
+    ) {
       throw new UnauthorizedException("Invalid access token");
     }
 
-    request.actor = { ...actor, role: user.role };
+    request.actor = { ...actor, role: session.user.role };
     return true;
   }
 }

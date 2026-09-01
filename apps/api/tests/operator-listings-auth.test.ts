@@ -40,10 +40,13 @@ describe("authenticated operator listing management", () => {
         await expect(
           getListings(baseUrl, jwt.sign({ sub: "usr_demo_owner", businessId: DEMO_BUSINESS_ID, role: "owner", exp: Math.floor(Date.now() / 1000) - 60 }, jwtSecret))
         ).resolves.toMatchObject({ status: 401 });
-        await expect(getListings(baseUrl, signToken(disabledUser.id, DEMO_BUSINESS_ID))).resolves.toMatchObject({ status: 401 });
-        await expect(getListings(baseUrl, signToken("usr_demo_owner", "biz_other_operator"))).resolves.toMatchObject({ status: 401 });
+        await expect(getListings(baseUrl, await signToken(disabledUser.id, DEMO_BUSINESS_ID))).resolves.toMatchObject({ status: 401 });
+        await expect(
+          getListings(baseUrl, jwt.sign({ sub: "usr_demo_owner", businessId: "biz_other_operator", role: "owner", sid: prefixedId("ses") }, jwtSecret, { expiresIn: "15m" }))
+        ).resolves.toMatchObject({ status: 401 });
       });
     } finally {
+      await prisma.session.deleteMany({ where: { userId: disabledUser.id } });
       await prisma.user.deleteMany({ where: { id: disabledUser.id } });
     }
   });
@@ -54,7 +57,7 @@ describe("authenticated operator listing management", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         const response = await getListings(baseUrl, token);
         expect(response.status).toBe(200);
         const listings = (await response.json()) as { id: string; businessId: string; title: string }[];
@@ -80,7 +83,7 @@ describe("authenticated operator listing management", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         const created = await createListing(baseUrl, token, {
           title: "Staff Created Tour",
           basePriceCents: 4200,
@@ -120,7 +123,7 @@ describe("authenticated operator listing management", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         await expect(getListings(baseUrl, token)).resolves.toMatchObject({ status: 200 });
         await expect(createListing(baseUrl, token, validListingBody("Viewer Create"))).resolves.toMatchObject({ status: 403 });
         await expect(updateListing(baseUrl, fixture.listingId, token, { title: "Viewer Update" })).resolves.toMatchObject({ status: 403 });
@@ -139,7 +142,7 @@ describe("authenticated operator listing management", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         await expect(createListing(baseUrl, token, { ...validListingBody("Invalid Guests"), minGuests: 10, maxGuests: 2 })).resolves.toMatchObject({ status: 400 });
         await expect(updateListing(baseUrl, fixture.listingId, token, { minGuests: 99 })).resolves.toMatchObject({ status: 400 });
         await expect(updateListing(baseUrl, otherFixture.listingId, token, { title: "Cross Tenant Update" })).resolves.toMatchObject({ status: 404 });
@@ -194,8 +197,12 @@ describe("authenticated operator listing management", () => {
     return fetch(`${baseUrl}/listings/${id}`, { method: "DELETE", headers: { authorization: `Bearer ${accessToken}` } });
   }
 
-  function signToken(userId: string, businessId: string) {
-    return jwt.sign({ sub: userId, businessId, role: "owner" }, jwtSecret, { expiresIn: "15m" });
+  async function signToken(userId: string, businessId: string) {
+    const sessionId = prefixedId("ses");
+    await prisma.session.create({
+      data: { id: sessionId, userId, businessId, refreshTokenHash: "access-token-test-session", expiresAt: new Date(Date.now() + 60_000) }
+    });
+    return jwt.sign({ sub: userId, businessId, role: "owner", sid: sessionId }, jwtSecret, { expiresIn: "15m" });
   }
 
   async function createListingFixture(slugSeed: string, role: "owner" | "admin" | "staff" | "viewer") {

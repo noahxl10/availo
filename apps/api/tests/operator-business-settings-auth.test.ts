@@ -40,10 +40,13 @@ describe("authenticated operator business settings", () => {
         await expect(
           getBusiness(baseUrl, jwt.sign({ sub: "usr_demo_owner", businessId: DEMO_BUSINESS_ID, role: "owner", exp: Math.floor(Date.now() / 1000) - 60 }, jwtSecret))
         ).resolves.toMatchObject({ status: 401 });
-        await expect(getBusiness(baseUrl, signToken(disabledUser.id, DEMO_BUSINESS_ID))).resolves.toMatchObject({ status: 401 });
-        await expect(getBusiness(baseUrl, signToken("usr_demo_owner", "biz_other_operator"))).resolves.toMatchObject({ status: 401 });
+        await expect(getBusiness(baseUrl, await signToken(disabledUser.id, DEMO_BUSINESS_ID))).resolves.toMatchObject({ status: 401 });
+        await expect(
+          getBusiness(baseUrl, jwt.sign({ sub: "usr_demo_owner", businessId: "biz_other_operator", role: "owner", sid: prefixedId("ses") }, jwtSecret, { expiresIn: "15m" }))
+        ).resolves.toMatchObject({ status: 401 });
       });
     } finally {
+      await prisma.session.deleteMany({ where: { userId: disabledUser.id } });
       await prisma.user.deleteMany({ where: { id: disabledUser.id } });
     }
   });
@@ -54,7 +57,7 @@ describe("authenticated operator business settings", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const response = await getBusiness(baseUrl, signToken(fixture.userId, fixture.businessId));
+        const response = await getBusiness(baseUrl, await signToken(fixture.userId, fixture.businessId));
         expect(response.status).toBe(200);
         const business = (await response.json()) as { id: string; name: string; slug: string; supportEmail: string | null };
 
@@ -79,7 +82,7 @@ describe("authenticated operator business settings", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const ownerResponse = await updateBusiness(baseUrl, signToken(ownerFixture.userId, ownerFixture.businessId), {
+        const ownerResponse = await updateBusiness(baseUrl, await signToken(ownerFixture.userId, ownerFixture.businessId), {
           name: "Owner Updated Co.",
           supportEmail: "owner-updated@example.invalid",
           timezone: "America/New_York"
@@ -87,7 +90,7 @@ describe("authenticated operator business settings", () => {
         expect(ownerResponse.status).toBe(200);
         await expect(ownerResponse.json()).resolves.toMatchObject({ id: ownerFixture.businessId, name: "Owner Updated Co.", timezone: "America/New_York" });
 
-        const adminResponse = await updateBusiness(baseUrl, signToken(adminFixture.userId, adminFixture.businessId), { supportPhone: "+1-555-0100" });
+        const adminResponse = await updateBusiness(baseUrl, await signToken(adminFixture.userId, adminFixture.businessId), { supportPhone: "+1-555-0100" });
         expect(adminResponse.status).toBe(200);
         await expect(adminResponse.json()).resolves.toMatchObject({ id: adminFixture.businessId, supportPhone: "+1-555-0100" });
 
@@ -111,10 +114,10 @@ describe("authenticated operator business settings", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        await expect(getBusiness(baseUrl, signToken(staffFixture.userId, staffFixture.businessId))).resolves.toMatchObject({ status: 200 });
-        await expect(getBusiness(baseUrl, signToken(viewerFixture.userId, viewerFixture.businessId))).resolves.toMatchObject({ status: 200 });
-        await expect(updateBusiness(baseUrl, signToken(staffFixture.userId, staffFixture.businessId), { name: "Staff Updated Co." })).resolves.toMatchObject({ status: 403 });
-        await expect(updateBusiness(baseUrl, signToken(viewerFixture.userId, viewerFixture.businessId), { name: "Viewer Updated Co." })).resolves.toMatchObject({ status: 403 });
+        await expect(getBusiness(baseUrl, await signToken(staffFixture.userId, staffFixture.businessId))).resolves.toMatchObject({ status: 200 });
+        await expect(getBusiness(baseUrl, await signToken(viewerFixture.userId, viewerFixture.businessId))).resolves.toMatchObject({ status: 200 });
+        await expect(updateBusiness(baseUrl, await signToken(staffFixture.userId, staffFixture.businessId), { name: "Staff Updated Co." })).resolves.toMatchObject({ status: 403 });
+        await expect(updateBusiness(baseUrl, await signToken(viewerFixture.userId, viewerFixture.businessId), { name: "Viewer Updated Co." })).resolves.toMatchObject({ status: 403 });
 
         await expect(prisma.business.findUniqueOrThrow({ where: { id: staffFixture.businessId } })).resolves.toMatchObject({ name: "Operator tenant-business-staff" });
         await expect(prisma.business.findUniqueOrThrow({ where: { id: viewerFixture.businessId } })).resolves.toMatchObject({ name: "Operator tenant-business-viewer" });
@@ -131,7 +134,7 @@ describe("authenticated operator business settings", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const token = signToken(fixture.userId, fixture.businessId);
+        const token = await signToken(fixture.userId, fixture.businessId);
         await expect(updateBusiness(baseUrl, token, { slug: "Invalid Slug" })).resolves.toMatchObject({ status: 400 });
         await expect(updateBusiness(baseUrl, token, { supportEmail: "not-an-email" })).resolves.toMatchObject({ status: 400 });
         await expect(updateBusiness(baseUrl, token, { timezone: "Mars/Olympus_Mons" })).resolves.toMatchObject({ status: 400 });
@@ -206,8 +209,12 @@ describe("authenticated operator business settings", () => {
     });
   }
 
-  function signToken(userId: string, businessId: string) {
-    return jwt.sign({ sub: userId, businessId, role: "owner" }, jwtSecret, { expiresIn: "15m" });
+  async function signToken(userId: string, businessId: string) {
+    const sessionId = prefixedId("ses");
+    await prisma.session.create({
+      data: { id: sessionId, userId, businessId, refreshTokenHash: "access-token-test-session", expiresAt: new Date(Date.now() + 60_000) }
+    });
+    return jwt.sign({ sub: userId, businessId, role: "owner", sid: sessionId }, jwtSecret, { expiresIn: "15m" });
   }
 
   async function createBusinessFixture(slugSeed: string, role: "owner" | "admin" | "staff" | "viewer") {

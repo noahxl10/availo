@@ -45,13 +45,14 @@ describe("authenticated dashboard overview", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const disabled = signToken(disabledUser.id, DEMO_BUSINESS_ID);
-        const mismatched = signToken("usr_demo_owner", "biz_other_operator");
+        const disabled = await signToken(disabledUser.id, DEMO_BUSINESS_ID);
+        const mismatched = jwt.sign({ sub: "usr_demo_owner", businessId: "biz_other_operator", role: "owner", sid: prefixedId("ses") }, jwtSecret, { expiresIn: "15m" });
 
         await expect(getOverview(baseUrl, disabled)).resolves.toMatchObject({ status: 401 });
         await expect(getOverview(baseUrl, mismatched)).resolves.toMatchObject({ status: 401 });
       });
     } finally {
+      await prisma.session.deleteMany({ where: { userId: disabledUser.id } });
       await prisma.user.deleteMany({ where: { id: disabledUser.id } });
     }
   });
@@ -61,7 +62,7 @@ describe("authenticated dashboard overview", () => {
 
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-        const response = await getOverview(baseUrl, signToken(fixture.userId, fixture.businessId));
+        const response = await getOverview(baseUrl, await signToken(fixture.userId, fixture.businessId));
         expect(response.status).toBe(200);
         const overview = (await response.json()) as {
           business: { id: string; name: string };
@@ -82,9 +83,24 @@ describe("authenticated dashboard overview", () => {
     }
   });
 
+  it("rejects access tokens after the operator business is suspended", async () => {
+    const fixture = await createOtherTenantFixture({ status: "suspended" });
+
+    try {
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+        const token = await signToken(fixture.userId, fixture.businessId);
+
+        await expect(getOverview(baseUrl, token)).resolves.toMatchObject({ status: 401 });
+        await expect(getMe(baseUrl, token)).resolves.toMatchObject({ status: 401 });
+      });
+    } finally {
+      await cleanupOtherTenantFixture(fixture.businessId);
+    }
+  });
+
   it("preserves the dashboard overview response shape for an authenticated demo operator", async () => {
     await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
-      const response = await getOverview(baseUrl, signToken("usr_demo_owner", DEMO_BUSINESS_ID));
+      const response = await getOverview(baseUrl, await signToken("usr_demo_owner", DEMO_BUSINESS_ID));
       expect(response.status).toBe(200);
       const overview = await response.json();
       expect(overview).toMatchObject({
@@ -96,6 +112,57 @@ describe("authenticated dashboard overview", () => {
         fullDates: expect.any(Array)
       });
     });
+  });
+
+  it("returns only the authenticated actor from /auth/me", async () => {
+    await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+      await expect(getMe(baseUrl)).resolves.toMatchObject({ status: 401 });
+
+      const response = await getMe(baseUrl, await signToken("usr_demo_owner", DEMO_BUSINESS_ID));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ userId: "usr_demo_owner", businessId: DEMO_BUSINESS_ID, role: "owner" });
+    });
+  });
+
+  it("does not expose the demo-bound email registration route", async () => {
+    await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+      const beforeUsers = await prisma.user.count({ where: { email: "new-demo-owner@example.invalid" } });
+      const beforeSessions = await prisma.session.count({ where: { user: { email: "new-demo-owner@example.invalid" } } });
+
+      const response = await postRegister(baseUrl, { email: "new-demo-owner@example.invalid", password: "local-password" });
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toMatchObject({ message: "Cannot POST /auth/email/register" });
+
+      expect(await prisma.user.count({ where: { email: "new-demo-owner@example.invalid" } })).toBe(beforeUsers);
+      expect(await prisma.session.count({ where: { user: { email: "new-demo-owner@example.invalid" } } })).toBe(beforeSessions);
+    });
+  });
+
+  it("invalidates session-bound access tokens on logout and refresh-token replay", async () => {
+    await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+
+    await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+      const loginResponse = await postLogin(baseUrl, { businessSlug: "sample-tours", email: "owner@example-tours.invalid", password: "local-password" });
+      expect(loginResponse.status).toBe(201);
+      const login = (await loginResponse.json()) as AuthResponse;
+
+      await expect(getMe(baseUrl, login.accessToken)).resolves.toMatchObject({ status: 200 });
+      await expect(postLogout(baseUrl, login.refreshToken)).resolves.toMatchObject({ status: 201 });
+      await expect(getMe(baseUrl, login.accessToken)).resolves.toMatchObject({ status: 401 });
+
+      const secondLoginResponse = await postLogin(baseUrl, { businessSlug: "sample-tours", email: "owner@example-tours.invalid", password: "local-password" });
+      const secondLogin = (await secondLoginResponse.json()) as AuthResponse;
+      const refreshResponse = await postRefresh(baseUrl, secondLogin.refreshToken);
+      expect(refreshResponse.status).toBe(201);
+      const refresh = (await refreshResponse.json()) as AuthResponse;
+
+      await expect(getMe(baseUrl, refresh.accessToken)).resolves.toMatchObject({ status: 200 });
+      await expect(postRefresh(baseUrl, secondLogin.refreshToken)).resolves.toMatchObject({ status: 201 });
+      await expect(getMe(baseUrl, refresh.accessToken)).resolves.toMatchObject({ status: 401 });
+    });
+
+    await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+    await prisma.auditLog.deleteMany({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: { in: ["auth.login", "auth.refresh", "auth.logout", "auth.refresh_reuse_revoked"] } } });
   });
 
   async function withHttpApp<T>(env: Record<string, string>, callback: (baseUrl: string) => Promise<T>) {
@@ -116,11 +183,40 @@ describe("authenticated dashboard overview", () => {
     return fetch(`${baseUrl}/dashboard/overview`, accessToken ? { headers: { authorization: `Bearer ${accessToken}` } } : {});
   }
 
-  function signToken(userId: string, businessId: string) {
-    return jwt.sign({ sub: userId, businessId, role: "owner" }, jwtSecret, { expiresIn: "15m" });
+  function getMe(baseUrl: string, accessToken?: string) {
+    return fetch(`${baseUrl}/auth/me`, accessToken ? { headers: { authorization: `Bearer ${accessToken}` } } : {});
   }
 
-  async function createOtherTenantFixture() {
+  function postRegister(baseUrl: string, body: unknown) {
+    return fetch(`${baseUrl}/auth/email/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  }
+
+  function postLogin(baseUrl: string, body: unknown) {
+    return fetch(`${baseUrl}/auth/email/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  }
+
+  function postRefresh(baseUrl: string, refreshToken: string) {
+    return fetch(`${baseUrl}/auth/refresh`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refreshToken }) });
+  }
+
+  function postLogout(baseUrl: string, refreshToken: string) {
+    return fetch(`${baseUrl}/auth/logout`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refreshToken }) });
+  }
+
+  async function signToken(userId: string, businessId: string) {
+    const sessionId = prefixedId("ses");
+    await prisma.session.create({
+      data: { id: sessionId, userId, businessId, refreshTokenHash: "access-token-test-session", expiresAt: new Date(Date.now() + 60_000) }
+    });
+    return jwt.sign({ sub: userId, businessId, role: "owner", sid: sessionId }, jwtSecret, { expiresIn: "15m" });
+  }
+
+  type AuthResponse = {
+    accessToken: string;
+    refreshToken: string;
+  };
+
+  async function createOtherTenantFixture(options: { status?: "active" | "suspended" } = {}) {
     const businessId = prefixedId("biz");
     const userId = prefixedId("usr");
     const listingId = prefixedId("lst");
@@ -131,7 +227,7 @@ describe("authenticated dashboard overview", () => {
         id: businessId,
         name: "Other Operator Co.",
         slug: `other-${businessId}`,
-        status: "active",
+        status: options.status ?? "active",
         timezone: "America/Denver",
         currency: "USD"
       }

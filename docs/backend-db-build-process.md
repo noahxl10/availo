@@ -21,7 +21,6 @@ This plan builds the backend for Availo with a local SQLite database first, whil
 ```env
 DATABASE_URL="file:./dev.db"
 JWT_ACCESS_SECRET="local-dev-access-secret"
-JWT_REFRESH_SECRET="local-dev-refresh-secret"
 APP_BASE_URL="http://localhost:3001"
 API_BASE_URL="http://localhost:4000"
 STRIPE_SECRET_KEY=""
@@ -121,7 +120,6 @@ where: {
 3. Implement:
 
 ```http
-POST /auth/email/register
 POST /auth/email/login
 POST /auth/refresh
 POST /auth/logout
@@ -131,10 +129,13 @@ GET  /auth/me
 4. Use short-lived access tokens:
    - 10-15 minutes
 
-5. Use refresh token rotation:
-   - Store hashed refresh tokens in `Session`.
-   - On refresh, invalidate the old token and issue a new one.
-   - On logout, revoke the session.
+5. Use tenant-scoped email login and refresh token rotation:
+   - `POST /auth/email/login` requires strict `businessSlug`, `email`, and `password` input, and only authenticates active users in an active matching business.
+   - Do not expose a demo-bound self-registration endpoint until an explicit onboarding flow exists.
+   - Store only the secret portion of opaque `v1.<sessionId>.<secret>` refresh tokens in `Session`.
+   - On refresh, look up the named session directly, invalidate it, issue a new session, and record the audit atomically.
+   - Treat reuse of a rotated refresh token as a compromised operator session and revoke active sessions for that user and business.
+   - On logout, revoke the named session and record the audit atomically.
 
 6. Add rate limits:
    - login attempts
