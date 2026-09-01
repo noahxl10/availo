@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Badge, BrandLockup, Button, Card, EmptyState, Input, Select, StatCard, Textarea } from "@availo/ui";
 import {
   bottomNavItems,
@@ -9,12 +9,15 @@ import {
 } from "../lib/mock-data";
 import {
   DashboardAuthRequiredError,
+  DashboardBookingNotFoundError,
   DashboardLoginRejectedError,
   DashboardRateLimitedError,
+  fetchDashboardBookingDetail,
   emptyOverview,
   fallbackOverview,
   fetchDashboardOverview,
   loginDashboardSession,
+  type DashboardBookingDetail,
   type DashboardLoginInput,
   type DashboardOverview,
   type DashboardUser
@@ -35,6 +38,7 @@ import {
 type Screen = "dashboard" | "listings" | "create" | "booking" | "availability" | "customers" | "embed" | "analytics";
 type ListingTab = "details" | "pricing" | "availability" | "add-ons";
 type ApiStatus = "loading" | "live" | "auth" | "error" | "unsupported";
+type BookingDetailStatus = "idle" | "loading" | "live" | "not-found" | "error";
 
 const addonPrices = [28, 17, 0] as const;
 
@@ -57,8 +61,12 @@ export function DashboardShell() {
   const [apiStatus, setApiStatus] = useState<ApiStatus>("loading");
   const [operator, setOperator] = useState<DashboardUser | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [selectedBookingId, setSelectedBookingId] = useState<string | null>(null);
+  const [bookingDetail, setBookingDetail] = useState<DashboardBookingDetail | null>(null);
+  const [bookingDetailStatus, setBookingDetailStatus] = useState<BookingDetailStatus>("idle");
   const [submittingLogin, setSubmittingLogin] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const bookingRequestIdRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -71,6 +79,10 @@ export function DashboardShell() {
       }
       setOperator(null);
       setOverview(emptyOverview);
+      bookingRequestIdRef.current += 1;
+      setSelectedBookingId(null);
+      setBookingDetail(null);
+      setBookingDetailStatus("idle");
       setApiStatus("auth");
     });
     if (!supportsDashboardSessionCoordination()) {
@@ -115,6 +127,10 @@ export function DashboardShell() {
     } catch (error) {
       setOverview(emptyOverview);
       setOperator(null);
+      bookingRequestIdRef.current += 1;
+      setSelectedBookingId(null);
+      setBookingDetail(null);
+      setBookingDetailStatus("idle");
       setApiStatus(error instanceof DashboardSessionCoordinationError ? "unsupported" : "auth");
       setLoginError(loginErrorMessage(error));
     } finally {
@@ -132,8 +148,43 @@ export function DashboardShell() {
       clearMemoryDashboardSession();
       setOperator(null);
       setOverview(emptyOverview);
+      bookingRequestIdRef.current += 1;
+      setSelectedBookingId(null);
+      setBookingDetail(null);
+      setBookingDetailStatus("idle");
       setApiStatus("auth");
       setSigningOut(false);
+    }
+  }
+
+  async function handleBookingSelect(booking: DashboardOverview["bookings"][number]) {
+    if (!booking.id) return;
+    const session = currentDashboardSession();
+    if (!session) {
+      setApiStatus("auth");
+      return;
+    }
+
+    setActiveNav("booking");
+    setSelectedBookingId(booking.id);
+    setBookingDetail(null);
+    setBookingDetailStatus("loading");
+    const requestId = bookingRequestIdRef.current + 1;
+    bookingRequestIdRef.current = requestId;
+    try {
+      const detail = await loadBookingDetailWithOneRefresh(booking.id, session.accessToken);
+      if (bookingRequestIdRef.current !== requestId) return;
+      setBookingDetail(detail);
+      setBookingDetailStatus("live");
+    } catch (error) {
+      if (bookingRequestIdRef.current !== requestId) return;
+      setBookingDetail(null);
+      if (error instanceof DashboardAuthRequiredError || error instanceof DashboardLoginRejectedError) {
+        setApiStatus("auth");
+        setBookingDetailStatus("idle");
+        return;
+      }
+      setBookingDetailStatus(error instanceof DashboardBookingNotFoundError ? "not-found" : "error");
     }
   }
 
@@ -141,13 +192,13 @@ export function DashboardShell() {
   const customerCount = new Set(overview.bookings.map((booking) => booking.name)).size;
   const businessName = apiStatus === "live" ? overview.business?.name ?? "Operator" : "Availo";
   const primaryListing = overview.listings[0] ?? fallbackOverview.listings[0]!;
-  const primaryBooking = overview.bookings[0] ?? fallbackOverview.bookings[0]!;
+  const selectedBookingSummary = overview.bookings.find((booking) => booking.id === selectedBookingId) ?? null;
 
   const pageTitle = {
     dashboard: "Good morning",
     listings: "Listings",
     create: "New Listing",
-    booking: "#BK-20485",
+    booking: selectedBookingId ? `#${selectedBookingId}` : "Booking Detail",
     availability: "Availability",
     customers: "Customers",
     embed: "Embed Widget",
@@ -157,7 +208,11 @@ export function DashboardShell() {
     dashboard: `Tuesday, May 5, 2026 · ${businessName}`,
     listings: `${overview.listings.length} listings · ${activeListingCount} active`,
     create: "Create or edit the customer-facing booking experience.",
-    booking: `${primaryBooking.listing} · ${primaryBooking.date}`,
+    booking: bookingDetail
+      ? `${bookingDetail.listing.title} · ${formatBookingDateTime(bookingDetail)}`
+      : selectedBookingSummary
+        ? `${selectedBookingSummary.listing} · ${selectedBookingSummary.date}`
+        : "Select a booking from recent activity",
     availability: "May schedule, capacity, and booked days from the live API.",
     customers: `${customerCount} customers from recent booking activity.`,
     embed: "Add a booking widget to any website in under 5 minutes.",
@@ -259,10 +314,10 @@ export function DashboardShell() {
         </div>
 
         {apiStatus !== "live" && <DashboardUnavailable error={loginError} onLogin={handleLogin} status={apiStatus} submitting={submittingLogin} />}
-        {apiStatus === "live" && activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={() => setActiveNav("booking")} />}
+        {apiStatus === "live" && activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={handleBookingSelect} />}
         {apiStatus === "live" && activeNav === "listings" && <ListingsManager listings={overview.listings} onCreate={() => setActiveNav("create")} />}
         {apiStatus === "live" && activeNav === "create" && <CreateListing listingTab={listingTab} listings={overview.listings} setListingTab={setListingTab} />}
-        {apiStatus === "live" && activeNav === "booking" && <BookingDetail booking={primaryBooking} listing={primaryListing} />}
+        {apiStatus === "live" && activeNav === "booking" && <BookingDetail detail={bookingDetail} status={bookingDetailStatus} summary={selectedBookingSummary} />}
         {apiStatus === "live" && activeNav === "availability" && <AvailabilityManager overview={overview} />}
         {apiStatus === "live" && activeNav === "customers" && <CustomersManager bookings={overview.bookings} />}
         {apiStatus === "live" && activeNav === "embed" && <EmbedSetup businessName={businessName} listing={primaryListing} />}
@@ -299,7 +354,23 @@ async function loadOverviewWithOneRefresh(accessToken: string): Promise<{ sessio
   }
 }
 
-function DashboardOverview({ onBooking, overview }: { onBooking: () => void; overview: DashboardOverview }) {
+async function loadBookingDetailWithOneRefresh(bookingId: string, accessToken: string): Promise<DashboardBookingDetail> {
+  try {
+    return await fetchDashboardBookingDetail(bookingId, accessToken);
+  } catch (error) {
+    if (!(error instanceof DashboardAuthRequiredError)) throw error;
+    const session = await refreshDashboardSessionAfterStaleToken(accessToken);
+    return fetchDashboardBookingDetail(bookingId, session.accessToken);
+  }
+}
+
+function DashboardOverview({
+  onBooking,
+  overview
+}: {
+  onBooking: (booking: DashboardOverview["bookings"][number]) => void;
+  overview: DashboardOverview;
+}) {
   return (
     <>
       <section className="stat-grid" aria-label="Dashboard metrics">
@@ -395,7 +466,7 @@ function operatorInitials(operator: DashboardUser | null) {
   return operator.email.slice(0, 2).toUpperCase();
 }
 
-function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["bookings"]; onBooking: () => void }) {
+function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["bookings"]; onBooking: (booking: DashboardOverview["bookings"][number]) => void }) {
   return (
     <Card className="recent-bookings" padded={false}>
       <div className="card-header">
@@ -409,7 +480,7 @@ function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["
       </div>
       <div className="booking-list">
         {bookings.map((booking, index) => (
-          <button className="booking-row" key={booking.id ?? `${booking.name}-${index}`} onClick={onBooking} type="button">
+          <button className="booking-row" disabled={!booking.id} key={booking.id ?? `${booking.name}-${index}`} onClick={() => onBooking(booking)} type="button">
             <span className="booking-row__avatar">{booking.initials}</span>
             <span className="booking-row__copy">
               <strong>{booking.name}</strong>
@@ -717,39 +788,125 @@ function AddOnsPanel() {
   );
 }
 
-function BookingDetail({ booking, listing }: { booking: DashboardOverview["bookings"][number]; listing: DashboardOverview["listings"][number] }) {
+function BookingDetail({
+  detail,
+  status,
+  summary
+}: {
+  detail: DashboardBookingDetail | null;
+  status: BookingDetailStatus;
+  summary: DashboardOverview["bookings"][number] | null;
+}) {
+  if (status === "loading") {
+    return <EmptyState className="dashboard-empty" icon="◷" title="Loading booking" body="Fetching the selected booking." />;
+  }
+  if (status === "not-found") {
+    return <EmptyState className="dashboard-empty" icon="◌" title="Booking unavailable" body="This booking is no longer available from the live API." />;
+  }
+  if (status === "error") {
+    return <EmptyState className="dashboard-empty" icon="◌" title="Booking unavailable" body="The selected booking could not be loaded." />;
+  }
+  if (!detail) {
+    return <EmptyState className="dashboard-empty" icon="◷" title="Select a booking" body="Open a booking from recent activity." />;
+  }
+
+  const guestBreakdown = [
+    detail.adultCount ? `${detail.adultCount} adult${detail.adultCount === 1 ? "" : "s"}` : null,
+    detail.childCount ? `${detail.childCount} child${detail.childCount === 1 ? "" : "ren"}` : null
+  ].filter(Boolean).join(", ") || `${detail.guestCount} guest${detail.guestCount === 1 ? "" : "s"}`;
+  const addOnRows = detail.addOns.length
+    ? detail.addOns.map((addOn) => [`${addOn.addOn.name} x${addOn.quantity}`, centsToCurrency(addOn.totalCents)])
+    : [["Add-ons", "None"]];
+
   return (
     <div className="detail-grid">
       <div className="detail-stack">
         <Card>
           <h2 className="panel-title">Guest</h2>
-          <div className="guest-row"><span>{booking.initials}</span><div><strong>{booking.name}</strong><p>Redacted customer contact · demo booking</p></div></div>
+          <div className="guest-row">
+            <span>{initials(detail.customerName)}</span>
+            <div>
+              <strong>{detail.customerName}</strong>
+              <p>{detail.customerEmail}{detail.customerPhone ? ` · ${detail.customerPhone}` : ""}</p>
+            </div>
+          </div>
         </Card>
         <Card>
           <h2 className="panel-title">Experience</h2>
           <div className="info-grid">
             {[
-              ["Listing", booking.listing],
-              ["Date & Time", booking.date],
-              ["Duration", listing.type.split("·")[1]?.trim() ?? "1 hour"],
-              ["Guests", `${booking.guests} pax`],
-              ["Resource", "Kayak Seat · capacity 12"],
-              ["Meeting Point", "100 Harbor Way, Santa Cruz"],
+              ["Listing", detail.listing.title],
+              ["Date & Time", formatBookingDateTime(detail)],
+              ["Duration", formatDuration(detail.listing.durationMinutes)],
+              ["Guests", `${detail.guestCount} pax · ${guestBreakdown}`],
+              ["Status", humanizeStatus(detail.status)],
+              ["Meeting Point", detail.listing.meetingPoint ?? "Not set"],
             ].map(([k, v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}
           </div>
         </Card>
-        <Card><h2 className="panel-title">Guest Notes</h2><p className="note">Demo booking note: guests should arrive 15 minutes early and dress for weather.</p></Card>
+        <Card>
+          <h2 className="panel-title">Guest Notes</h2>
+          <p className="note">{detail.notes?.trim() || "No notes on this booking."}</p>
+        </Card>
       </div>
       <Card className="payment-panel" padded={false}>
         <div className="payment-panel__inner">
           <h2 className="panel-title">Payment</h2>
-          {[["Adult tickets", booking.total], ["Tax", "8.7% included"], ["Source", "Online"], ["Payment type", "Credit card"]].map(([k, v]) => <div className="pay-row" key={k}><span>{k}</span><strong>{v}</strong></div>)}
-          <div className="pay-row pay-row--total"><span>Total</span><strong>{booking.total}</strong></div>
+          {[
+            ["Subtotal", centsToCurrency(detail.subtotalCents)],
+            ...addOnRows,
+            ["Tax", centsToCurrency(detail.taxCents)],
+            ["Platform fee", centsToCurrency(detail.platformFeeCents)],
+            ["Processor fee", centsToCurrency(detail.processorFeeCents)],
+            ["Payment status", humanizeStatus(detail.paymentStatus)],
+            ["Payment provider", detail.paymentProvider ? humanizeStatus(detail.paymentProvider) : "Not recorded"]
+          ].map(([k, v]) => <div className="pay-row" key={k}><span>{k}</span><strong>{v}</strong></div>)}
+          <div className="pay-row pay-row--total"><span>Total</span><strong>{centsToCurrency(detail.totalCents)}</strong></div>
         </div>
-        <div className="payment-actions"><Button type="button">Send Reminder</Button><Button variant="danger" type="button">Cancel Booking</Button></div>
+        <div className="payment-actions">
+          <Badge status={summary?.status ?? bookingBadgeStatus(detail.status)}>{humanizeStatus(detail.status)}</Badge>
+          <Button disabled type="button" variant="secondary">Reminder unavailable</Button>
+          <Button disabled type="button" variant="danger">Cancellation unavailable</Button>
+        </div>
       </Card>
     </div>
   );
+}
+
+function formatBookingDateTime(detail: Pick<DashboardBookingDetail, "bookingDate" | "startTime" | "endTime">) {
+  const parsed = new Date(`${detail.bookingDate}T12:00:00`);
+  const date = Number.isNaN(parsed.getTime())
+    ? detail.bookingDate
+    : parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return `${date} · ${detail.startTime} - ${detail.endTime}`;
+}
+
+function formatDuration(minutes: number) {
+  if (minutes % 60 === 0) return `${minutes / 60} hour${minutes === 60 ? "" : "s"}`;
+  return `${minutes} min`;
+}
+
+function centsToCurrency(cents: number) {
+  return new Intl.NumberFormat("en-US", { currency: "USD", style: "currency" }).format(cents / 100);
+}
+
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("") || "BK";
+}
+
+function humanizeStatus(status: string) {
+  return status.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function bookingBadgeStatus(status: string): DashboardOverview["bookings"][number]["status"] {
+  if (status === "confirmed") return "confirmed";
+  if (status === "pending_payment") return "pending";
+  return "cancelled";
 }
 
 function EmbedSetup({ businessName, listing }: { businessName: string; listing: DashboardOverview["listings"][number] }) {

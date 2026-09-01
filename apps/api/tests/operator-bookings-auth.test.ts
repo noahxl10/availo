@@ -62,8 +62,11 @@ describe("authenticated operator booking reads", () => {
         const firstPage = (await firstPageResponse.json()) as BookingPage;
 
         expect(firstPage.items.map((booking) => booking.id)).toEqual([fixture.bookingIds[2], fixture.bookingIds[1]]);
-        expect(firstPage.items.every((booking) => booking.businessId === fixture.businessId)).toBe(true);
+        expect(firstPage.items.every((booking) => !("businessId" in booking))).toBe(true);
         expect(JSON.stringify(firstPage)).not.toContain(otherFixture.businessId);
+        expect(JSON.stringify(firstPage)).not.toContain("paymentReferenceId");
+        expect(JSON.stringify(firstPage)).not.toContain("paymentIntentId");
+        expect(JSON.stringify(firstPage)).not.toContain("paymentExpiresAt");
         expect(firstPage.nextCursor).toEqual(expect.any(String));
 
         const secondPageResponse = await getBookings(baseUrl, await signToken(fixture.userId, fixture.businessId), `?limit=2&cursor=${encodeURIComponent(firstPage.nextCursor ?? "")}`);
@@ -143,7 +146,12 @@ describe("authenticated operator booking reads", () => {
         const token = await signToken(fixture.userId, fixture.businessId);
         const ownBooking = await getBooking(baseUrl, fixture.bookingIds[0]!, token);
         expect(ownBooking.status).toBe(200);
-        await expect(ownBooking.json()).resolves.toMatchObject({ id: fixture.bookingIds[0]!, businessId: fixture.businessId });
+        const ownBookingBody = await ownBooking.json();
+        expect(ownBookingBody).toMatchObject({ id: fixture.bookingIds[0]!, customerName: "Customer tenant-detail-0", listing: { id: fixture.listingId } });
+        expect(JSON.stringify(ownBookingBody)).not.toContain("businessId");
+        expect(JSON.stringify(ownBookingBody)).not.toContain("paymentReferenceId");
+        expect(JSON.stringify(ownBookingBody)).not.toContain("paymentIntentId");
+        expect(JSON.stringify(ownBookingBody)).not.toContain("paymentExpiresAt");
 
         const missing = await getBooking(baseUrl, "bok_missing_operator_read", token);
         const crossTenant = await getBooking(baseUrl, otherFixture.bookingIds[0]!, token);
@@ -300,6 +308,6 @@ describe("authenticated operator booking reads", () => {
 });
 
 type BookingPage = {
-  items: { id: string; businessId: string }[];
+  items: { id: string }[];
   nextCursor: string | null;
 };

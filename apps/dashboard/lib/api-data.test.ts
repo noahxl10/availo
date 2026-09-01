@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DashboardAuthRequiredError,
+  DashboardBookingNotFoundError,
   DashboardLoginRejectedError,
   DashboardRateLimitedError,
+  fetchDashboardBookingDetail,
   fetchDashboardOverview,
   loginDashboardSession,
   logoutDashboardSession,
@@ -40,6 +42,42 @@ describe("dashboard API data", () => {
 
   it("rejects malformed overview payloads instead of substituting fallback data", () => {
     expect(() => normalizeDashboardOverview({ stats: [] })).toThrow("Dashboard API returned an invalid overview");
+  });
+
+  it("fetches booking detail with bearer auth and projects away internal provider fields", async () => {
+    process.env.NEXT_PUBLIC_API_BASE_URL = "https://api.availo.test/";
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(validBookingDetail()), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const detail = await fetchDashboardBookingDetail("bk/test id", "access-token");
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.availo.test/bookings/bk%2Ftest%20id", {
+      cache: "no-store",
+      headers: { authorization: "Bearer access-token" }
+    });
+    expect(detail).toMatchObject({
+      id: "bk_test",
+      customerEmail: "guest@example.invalid",
+      listing: { id: "lst_test", title: "Harbor Kayak Tour" }
+    });
+    expect(JSON.stringify(detail)).not.toContain("paymentReferenceId");
+    expect(JSON.stringify(detail)).not.toContain("paymentIntentId");
+    expect(JSON.stringify(detail)).not.toContain("businessId");
+  });
+
+  it("maps booking detail auth, not-found, and malformed responses", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 401 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...validBookingDetail(), refreshToken: "v1.unsafe" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...validBookingDetail(), guestCount: "2" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toBeInstanceOf(DashboardAuthRequiredError);
+    await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toBeInstanceOf(DashboardBookingNotFoundError);
+    await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toThrow("Dashboard booking API returned an invalid detail");
+    await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toThrow("Dashboard booking API returned an invalid detail");
   });
 
   it("logs in through the browser endpoint with credentialed no-store fetch", async () => {
@@ -114,6 +152,59 @@ describe("dashboard API data", () => {
       ok: true,
       user: { id: "usr_test", email: "owner@example.com", businessId: "biz_test", role: "owner" },
       accessToken: "access-token"
+    };
+  }
+
+  function validBookingDetail() {
+    return {
+      id: "bk_test",
+      businessId: "biz_internal",
+      listingId: "lst_test",
+      customerName: "Alex Rivera",
+      customerEmail: "guest@example.invalid",
+      customerPhone: "+15551234567",
+      bookingDate: "2026-05-05",
+      startTime: "9:30 AM",
+      endTime: "10:30 AM",
+      guestCount: 2,
+      adultCount: 2,
+      childCount: 0,
+      status: "confirmed",
+      paymentStatus: "paid",
+      paymentProvider: "stripe",
+      paymentReferenceId: "cs_internal",
+      paymentIntentId: "pi_internal",
+      paymentExpectedAmountCents: 14105,
+      paymentExpectedCurrency: "USD",
+      paymentExpiresAt: null,
+      subtotalCents: 13000,
+      taxCents: 1105,
+      platformFeeCents: 0,
+      processorFeeCents: 0,
+      totalCents: 14105,
+      notes: "Arriving early.",
+      createdAt: "2026-05-01T12:00:00.000Z",
+      updatedAt: "2026-05-01T12:00:00.000Z",
+      listing: {
+        id: "lst_test",
+        businessId: "biz_internal",
+        title: "Harbor Kayak Tour",
+        category: "Tour",
+        durationMinutes: 60,
+        capacity: 12,
+        meetingPoint: "100 Harbor Way"
+      },
+      addOns: [
+        {
+          id: "bao_test",
+          bookingId: "bk_test",
+          addOnId: "add_test",
+          quantity: 1,
+          priceCents: 1200,
+          totalCents: 1200,
+          addOn: { id: "add_test", name: "Wetsuit", description: "Warm layer", priceCents: 1200 }
+        }
+      ]
     };
   }
 });
