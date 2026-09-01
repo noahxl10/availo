@@ -39,6 +39,7 @@ for (const [name, vulnerability] of Object.entries(vulnerabilities)) {
       const exception = allowlist[url];
       if (!exception) return false;
       if (typeof exception.owner !== "string" || !exception.owner.trim()) return false;
+      if (typeof exception.independentApproval !== "string" || !exception.independentApproval.trim()) return false;
       if (typeof exception.reason !== "string" || !exception.reason.trim()) return false;
       const expiresAt = new Date(`${exception.expires}T23:59:59Z`);
       if (Number.isNaN(expiresAt.valueOf()) || expiresAt < new Date()) return false;

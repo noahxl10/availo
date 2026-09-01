@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import argon2 from "argon2";
 import jwt from "jsonwebtoken";
 import type { AddressInfo } from "node:net";
 import { NestFactory } from "@nestjs/core";
@@ -33,11 +34,12 @@ describe("authenticated dashboard overview", () => {
   });
 
   it("rejects disabled users and tenant-mismatched claims before returning dashboard data", async () => {
+    const disabledUserId = prefixedId("usr");
     const disabledUser = await prisma.user.create({
       data: {
-        id: prefixedId("usr"),
+        id: disabledUserId,
         businessId: DEMO_BUSINESS_ID,
-        email: "disabled-dashboard@example.invalid",
+        email: `${disabledUserId}@disabled-dashboard.example.invalid`,
         role: "owner",
         status: "disabled"
       }
@@ -165,6 +167,74 @@ describe("authenticated dashboard overview", () => {
     await prisma.auditLog.deleteMany({ where: { businessId: DEMO_BUSINESS_ID, userId: "usr_demo_owner", action: { in: ["auth.login", "auth.refresh", "auth.logout", "auth.refresh_reuse_revoked"] } } });
   });
 
+  it("uses an origin-bound HttpOnly cookie transport for browser sessions without changing JSON auth", async () => {
+    const fixture = await createOtherTenantFixture();
+    await prisma.user.update({
+      where: { id: fixture.userId },
+      data: { email: "browser-session-owner@example.invalid", passwordHash: await argon2.hash("local-password") }
+    });
+    const credentials = { businessSlug: fixture.businessSlug, email: "browser-session-owner@example.invalid", password: "local-password" };
+
+    try {
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret, CORS_ORIGINS: "https://dashboard.availo.test", NODE_ENV: "production" }, async (baseUrl) => {
+        await expect(postBrowserLogin(baseUrl, credentials)).resolves.toMatchObject({ status: 403 });
+        await expect(postBrowserLogin(baseUrl, credentials, "https://foreign.availo.test")).resolves.toMatchObject({ status: 403 });
+        const missingRefreshResponse = await postBrowserRefresh(baseUrl, undefined, "https://dashboard.availo.test");
+        expect(missingRefreshResponse.status).toBe(201);
+        await expect(missingRefreshResponse.json()).resolves.toEqual({ ok: false, error: "Invalid refresh token" });
+        expect(missingRefreshResponse.headers.get("set-cookie")).toContain("Max-Age=0");
+
+        const loginResponse = await postBrowserLogin(baseUrl, credentials, "https://dashboard.availo.test");
+        expect(loginResponse.status).toBe(201);
+        expect(loginResponse.headers.get("cache-control")).toBe("no-store");
+        const login = await loginResponse.json() as { ok: boolean; accessToken: string; refreshToken?: string };
+        expect(login).toMatchObject({ ok: true, accessToken: expect.any(String) });
+        expect(login.refreshToken).toBeUndefined();
+        const firstCookie = refreshCookie(loginResponse);
+        expect(firstCookie).toContain("availo_browser_refresh=v1.");
+        expect(firstCookie).toContain("Path=/auth/browser");
+        expect(firstCookie).toContain("HttpOnly");
+        expect(firstCookie).toContain("SameSite=Lax");
+        expect(firstCookie).toContain("Secure");
+        expect(firstCookie).not.toContain("Domain=");
+
+        const refreshResponse = await postBrowserRefresh(baseUrl, cookieValue(firstCookie), "https://dashboard.availo.test");
+        expect(refreshResponse.status).toBe(201);
+        const refresh = await refreshResponse.json() as { ok: boolean; accessToken: string; refreshToken?: string };
+        expect(refresh).toMatchObject({ ok: true, accessToken: expect.any(String) });
+        expect(refresh.refreshToken).toBeUndefined();
+        const rotatedCookie = refreshCookie(refreshResponse);
+        expect(rotatedCookie).not.toBe(firstCookie);
+        expect(await prisma.session.count({ where: { userId: fixture.userId, revokedAt: null } })).toBe(1);
+
+        const replayResponse = await postBrowserRefresh(baseUrl, cookieValue(firstCookie), "https://dashboard.availo.test");
+        expect(replayResponse.status).toBe(201);
+        await expect(replayResponse.json()).resolves.toEqual({ ok: false, error: "Invalid refresh token" });
+        expect(replayResponse.headers.get("set-cookie")).toContain("Max-Age=0");
+        expect(await prisma.session.count({ where: { userId: fixture.userId, revokedAt: null } })).toBe(0);
+        await expect(getMe(baseUrl, refresh.accessToken)).resolves.toMatchObject({ status: 401 });
+
+        const logoutResponse = await postBrowserLogout(baseUrl, cookieValue(rotatedCookie), "https://dashboard.availo.test");
+        expect(logoutResponse.status).toBe(201);
+        await expect(logoutResponse.json()).resolves.toEqual({ ok: true });
+        expect(logoutResponse.headers.get("set-cookie")).toContain("Max-Age=0");
+
+        const jsonLogin = await postLogin(baseUrl, credentials);
+        expect(jsonLogin.status).toBe(201);
+        expect(jsonLogin.headers.get("cache-control")).toBe("no-store");
+        expect((await jsonLogin.json()) as AuthResponse).toMatchObject({ refreshToken: expect.stringMatching(/^v1\./) });
+      });
+
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret, CORS_ORIGINS: "http://localhost:3000", NODE_ENV: "test" }, async (baseUrl) => {
+        const response = await postBrowserLogin(baseUrl, credentials, "http://localhost:3000");
+        expect(response.status).toBe(201);
+        expect(refreshCookie(response)).not.toContain("Secure");
+      });
+    } finally {
+      await cleanupOtherTenantFixture(fixture.businessId);
+    }
+  });
+
   async function withHttpApp<T>(env: Record<string, string>, callback: (baseUrl: string) => Promise<T>) {
     return withEnv(env, async () => {
       const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, bodyParser: false, logger: false });
@@ -203,6 +273,32 @@ describe("authenticated dashboard overview", () => {
     return fetch(`${baseUrl}/auth/logout`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ refreshToken }) });
   }
 
+  function postBrowserLogin(baseUrl: string, body: unknown, origin?: string) {
+    return fetch(`${baseUrl}/auth/browser/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(origin ? { origin } : {}) },
+      body: JSON.stringify(body)
+    });
+  }
+
+  function postBrowserRefresh(baseUrl: string, cookie: string | undefined, origin: string) {
+    return fetch(`${baseUrl}/auth/browser/refresh`, { method: "POST", headers: { origin, ...(cookie ? { cookie } : {}) } });
+  }
+
+  function postBrowserLogout(baseUrl: string, cookie: string | undefined, origin: string) {
+    return fetch(`${baseUrl}/auth/browser/logout`, { method: "POST", headers: { origin, ...(cookie ? { cookie } : {}) } });
+  }
+
+  function refreshCookie(response: Response) {
+    const cookie = response.headers.get("set-cookie");
+    if (!cookie) throw new Error("Expected browser refresh cookie");
+    return cookie;
+  }
+
+  function cookieValue(cookie: string) {
+    return cookie.split(";")[0]!;
+  }
+
   async function signToken(userId: string, businessId: string) {
     const sessionId = prefixedId("ses");
     await prisma.session.create({
@@ -218,6 +314,7 @@ describe("authenticated dashboard overview", () => {
 
   async function createOtherTenantFixture(options: { status?: "active" | "suspended" } = {}) {
     const businessId = prefixedId("biz");
+    const businessSlug = `other-${businessId.replaceAll("_", "-")}`;
     const userId = prefixedId("usr");
     const listingId = prefixedId("lst");
     const bookingId = prefixedId("bok");
@@ -226,7 +323,7 @@ describe("authenticated dashboard overview", () => {
       data: {
         id: businessId,
         name: "Other Operator Co.",
-        slug: `other-${businessId}`,
+        slug: businessSlug,
         status: options.status ?? "active",
         timezone: "America/Denver",
         currency: "USD"
@@ -271,7 +368,7 @@ describe("authenticated dashboard overview", () => {
       }
     });
 
-    return { businessId, userId, listingId, bookingId };
+    return { businessId, businessSlug, userId, listingId, bookingId };
   }
 
   async function cleanupOtherTenantFixture(businessId: string) {

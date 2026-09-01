@@ -33,7 +33,7 @@ npm run dev
 
 The dashboard will be available at `http://localhost:3000` and the API at `http://localhost:4000`.
 
-After seeding, the dashboard can show the demo operator data served by the API once an operator access token is present in the browser under `localStorage["availo.accessToken"]`. If the dashboard cannot authenticate or reach `NEXT_PUBLIC_API_BASE_URL`, it displays an explicit status instead of substituting mock data; fix the API URL, auth token, or API process before treating the install as working.
+After seeding, the dashboard can show the demo operator data served by the API once an operator access token is present in the browser under `localStorage["availo.accessToken"]`. If the dashboard cannot authenticate or reach `NEXT_PUBLIC_API_BASE_URL`, it displays an explicit status instead of substituting mock data; fix the API URL, auth token, or API process before treating the install as working. A browser sign-in UI has not been wired up yet; future dashboard clients should use the browser-session endpoints described below rather than storing refresh tokens in web storage.
 
 ## Configuration
 
@@ -99,6 +99,8 @@ Refund requests also fail closed until Availo has an authenticated refund provid
 Seeded installs include the demo owner user for local evaluation. Operator email login is tenant-scoped: `POST /auth/email/login` requires `businessSlug`, `email`, and `password`, and it authenticates only active users in an active matching business. The old demo-bound email registration route is not exposed; first-business onboarding should use a deliberate bootstrap flow when one is implemented.
 
 Access tokens are bound to their issuing session, so logout, refresh rotation, refresh-token reuse, or session expiry invalidates protected operator API access for that token. Refresh tokens are opaque database-backed credentials in the form `v1.<sessionId>.<secret>`. Only the secret portion is hashed in the `Session` row. Refresh rotates the named session once; reuse of a rotated token revokes active sessions for that operator and business and requires a fresh login. Logout revokes the named session.
+
+Non-browser API clients continue to use `POST /auth/email/login`, `POST /auth/refresh`, and `POST /auth/logout` with the refresh token in JSON. Browser dashboards should use `POST /auth/browser/login`, `/auth/browser/refresh`, and `/auth/browser/logout` instead. These endpoints require an `Origin` exactly matching `CORS_ORIGINS` (or `APP_BASE_URL` when `CORS_ORIGINS` is unset); local development accepts `http://localhost:<port>` and `http://127.0.0.1:<port>` like the CORS default. The browser endpoints put only the opaque refresh token in a host-only `HttpOnly`, `SameSite=Lax` cookie scoped to `/auth/browser`, return the short-lived access token with `Cache-Control: no-store`, and never serialize the refresh token. Browser refresh preserves the same one-time rotation and replay revocation as JSON refresh, so dashboard clients must use a single-flight refresh path across tabs before a browser sign-in UI is wired up. The cookie is `Secure` in production and when the request is HTTPS. Serve the API and dashboard behind HTTPS in production.
 
 ## Database notes
 

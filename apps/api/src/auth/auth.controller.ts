@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, HttpException, HttpStatus, Inject, Post, Req, Res, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Header, HttpException, HttpStatus, Inject, Post, Req, Res, UseGuards } from "@nestjs/common";
 import { randomBytes } from "node:crypto";
 import type { Prisma, UserRole } from "@prisma/client";
 import argon2 from "argon2";
@@ -25,12 +25,21 @@ const loginInput = z
   .strict();
 const refreshInput = z.object({ refreshToken: z.string().min(1).max(4096) }).strict();
 const DUMMY_PASSWORD_HASH = "$argon2id$v=19$m=65536,t=3,p=4$DEZQyOGhqxFXLAtrvmTfzg$Rm5bizR14A68axJuG+YSiTG0o+2BeYukCf0fh0AKehY";
+const BROWSER_REFRESH_COOKIE = "availo_browser_refresh";
+const BROWSER_REFRESH_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 type AuthUser = {
   id: string;
   businessId: string | null;
   email: string | null;
   role: UserRole;
+};
+
+type AuthSession = {
+  ok: true;
+  user: { id: string; email: string; businessId: string; role: UserRole };
+  accessToken: string;
+  refreshToken: string;
 };
 
 @Controller("auth")
@@ -44,7 +53,75 @@ export class AuthController {
   ) {}
 
   @Post("email/login")
+  @Header("Cache-Control", "no-store")
   async login(@Body() body: unknown, @Req() request?: RequestLike, @Res({ passthrough: true }) response?: ResponseLike) {
+    return this.loginWithSession(body, request, response);
+  }
+
+  @Post("refresh")
+  @Header("Cache-Control", "no-store")
+  async refresh(@Body() body: unknown, @Req() request?: RequestLike, @Res({ passthrough: true }) response?: ResponseLike) {
+    const { refreshToken } = parseRefreshInput(body);
+    return this.refreshWithToken(refreshToken, request, response);
+  }
+
+  @Post("logout")
+  @Header("Cache-Control", "no-store")
+  async logout(@Body() body: unknown) {
+    const { refreshToken } = parseRefreshInput(body);
+    await this.logoutWithToken(refreshToken);
+    return { ok: true };
+  }
+
+  @Post("browser/login")
+  @Header("Cache-Control", "no-store")
+  async browserLogin(@Body() body: unknown, @Req() request?: RequestLike, @Res({ passthrough: true }) response?: ResponseLike) {
+    enforceBrowserOrigin(request);
+    const result = await this.loginWithSession(body, request, response);
+    if (!result.ok) return result;
+
+    setBrowserRefreshCookie(response, result.refreshToken, request);
+    return browserSessionResponse(result);
+  }
+
+  @Post("browser/refresh")
+  @Header("Cache-Control", "no-store")
+  async browserRefresh(@Req() request?: RequestLike, @Res({ passthrough: true }) response?: ResponseLike) {
+    enforceBrowserOrigin(request);
+    const refreshToken = readCookie(request, BROWSER_REFRESH_COOKIE);
+    if (!refreshToken) {
+      clearBrowserRefreshCookie(response, request);
+      return invalidRefreshToken();
+    }
+
+    const result = await this.refreshWithToken(refreshToken, request, response);
+    if (!result.ok) {
+      clearBrowserRefreshCookie(response, request);
+      return result;
+    }
+
+    setBrowserRefreshCookie(response, result.refreshToken, request);
+    return browserSessionResponse(result);
+  }
+
+  @Post("browser/logout")
+  @Header("Cache-Control", "no-store")
+  async browserLogout(@Req() request?: RequestLike, @Res({ passthrough: true }) response?: ResponseLike) {
+    enforceBrowserOrigin(request);
+    const refreshToken = readCookie(request, BROWSER_REFRESH_COOKIE);
+    if (refreshToken) await this.logoutWithToken(refreshToken);
+    clearBrowserRefreshCookie(response, request);
+    return { ok: true };
+  }
+
+  @Get("me")
+  @Header("Cache-Control", "no-store")
+  @UseGuards(OperatorAuthGuard)
+  me(@CurrentActor() actor: AuthenticatedActor) {
+    return { userId: actor.userId, businessId: actor.businessId, role: actor.role };
+  }
+
+  private async loginWithSession(body: unknown, request: RequestLike | undefined, response: ResponseLike | undefined) {
     enforceRateLimit(response, this.loginIpRateLimiter.consume({ key: clientSource(request) }), "Too many login attempts. Please try again later.");
     const input = parseLoginInput(body);
     enforceRateLimit(
@@ -66,10 +143,8 @@ export class AuthController {
     return this.createSession(user, "auth.login");
   }
 
-  @Post("refresh")
-  async refresh(@Body() body: unknown, @Req() request?: RequestLike, @Res({ passthrough: true }) response?: ResponseLike) {
+  private async refreshWithToken(refreshToken: string, request: RequestLike | undefined, response: ResponseLike | undefined) {
     enforceRateLimit(response, this.refreshIpRateLimiter.consume({ key: clientSource(request) }), "Too many refresh attempts. Please try again later.");
-    const { refreshToken } = parseRefreshInput(body);
     const token = parseRefreshToken(refreshToken);
     if (!token) return invalidRefreshToken();
     enforceRateLimit(response, this.refreshSessionRateLimiter.consume({ key: token.sessionId }), "Too many refresh attempts. Please try again later.");
@@ -113,11 +188,9 @@ export class AuthController {
     }));
   }
 
-  @Post("logout")
-  async logout(@Body() body: unknown) {
-    const { refreshToken } = parseRefreshInput(body);
+  private async logoutWithToken(refreshToken: string) {
     const token = parseRefreshToken(refreshToken);
-    if (!token) return { ok: true };
+    if (!token) return;
 
     await this.prisma.$transaction(async (tx) => {
       const session = await tx.session.findUnique({ where: { id: token.sessionId }, select: { id: true, userId: true, businessId: true, refreshTokenHash: true, revokedAt: true, expiresAt: true } });
@@ -130,20 +203,13 @@ export class AuthController {
         data: { id: prefixedId("aud"), businessId: session.businessId, userId: session.userId, action: "auth.logout", entityType: "session", entityId: session.id }
       });
     });
-    return { ok: true };
   }
 
-  @Get("me")
-  @UseGuards(OperatorAuthGuard)
-  me(@CurrentActor() actor: AuthenticatedActor) {
-    return { userId: actor.userId, businessId: actor.businessId, role: actor.role };
-  }
-
-  private async createSession(user: AuthUser, action: "auth.login" | "auth.refresh") {
+  private async createSession(user: AuthUser, action: "auth.login" | "auth.refresh"): Promise<AuthSession> {
     return this.prisma.$transaction((tx) => this.createSessionInTransaction(tx, user, action));
   }
 
-  private async createSessionInTransaction(tx: Prisma.TransactionClient, user: AuthUser, action: "auth.login" | "auth.refresh") {
+  private async createSessionInTransaction(tx: Prisma.TransactionClient, user: AuthUser, action: "auth.login" | "auth.refresh"): Promise<AuthSession> {
     if (!user.businessId) throw new Error("Active operator is missing a business");
 
     const sessionId = prefixedId("ses");
@@ -200,11 +266,67 @@ function invalidRefreshToken() {
 type RequestLike = {
   ip?: string;
   socket?: { remoteAddress?: string };
+  secure?: boolean;
+  protocol?: string;
+  headers?: { cookie?: string; origin?: string | string[] };
 };
 
 type ResponseLike = {
   setHeader(name: string, value: string): void;
 };
+
+function browserSessionResponse(session: AuthSession) {
+  return { ok: true as const, user: session.user, accessToken: session.accessToken };
+}
+
+function enforceBrowserOrigin(request: RequestLike | undefined) {
+  const origin = request?.headers?.origin;
+  if (typeof origin !== "string" || !isAllowedDashboardOrigin(origin)) {
+    throw new HttpException({ message: "Invalid request origin" }, HttpStatus.FORBIDDEN);
+  }
+}
+
+function isAllowedDashboardOrigin(origin: string) {
+  const configured = process.env.CORS_ORIGINS ?? process.env.APP_BASE_URL;
+  if (!configured) return /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
+
+  const origins = configured.split(",").map((origin) => origin.trim()).filter(Boolean);
+  if (origins.includes("*")) {
+    throw new Error("CORS_ORIGINS cannot include '*' while credentialed CORS is enabled.");
+  }
+  return origins.includes(origin);
+}
+
+function setBrowserRefreshCookie(response: ResponseLike | undefined, refreshToken: string, request: RequestLike | undefined) {
+  response?.setHeader("Set-Cookie", browserCookieHeader(refreshToken, request));
+}
+
+function clearBrowserRefreshCookie(response: ResponseLike | undefined, request: RequestLike | undefined) {
+  response?.setHeader("Set-Cookie", browserCookieHeader("", request, 0));
+}
+
+function browserCookieHeader(value: string, request: RequestLike | undefined, maxAgeSeconds = BROWSER_REFRESH_COOKIE_MAX_AGE_SECONDS) {
+  const attributes = [
+    `${BROWSER_REFRESH_COOKIE}=${value}`,
+    "Path=/auth/browser",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${maxAgeSeconds}`
+  ];
+  if (maxAgeSeconds === 0) attributes.push("Expires=Thu, 01 Jan 1970 00:00:00 GMT");
+  if (process.env.NODE_ENV === "production" || request?.secure || request?.protocol === "https") attributes.push("Secure");
+  return attributes.join("; ");
+}
+
+function readCookie(request: RequestLike | undefined, name: string) {
+  const cookieHeader = request?.headers?.cookie;
+  if (!cookieHeader) return undefined;
+  for (const part of cookieHeader.split(";")) {
+    const [key, ...value] = part.trim().split("=");
+    if (key === name) return value.join("=");
+  }
+  return undefined;
+}
 
 function clientSource(request: RequestLike | undefined) {
   return request?.ip ?? request?.socket?.remoteAddress ?? "unknown";
