@@ -389,6 +389,8 @@ GET /bookings?limit=25&cursor=...
 GET /listings?limit=50&cursor=...
 ```
 
+`GET /bookings` is an authenticated operator API. It derives the tenant from the verified access token and returns `{ "items": [...], "nextCursor": "..." }`, with `limit` defaulting to `25` and capped at `100`. `GET /bookings/:id` must use the same tenant scope and return a generic `404` for both missing and cross-tenant IDs.
+
 5. Use select projections:
 
 ```ts
@@ -533,4 +535,3 @@ Run a new migration path in staging. Do not point production at a migrated SQLit
 5. Public embed APIs expose only public-safe data.
 6. Refresh tokens are rotated and stored hashed.
 7. Audit logs exist for operator and payment-sensitive actions.
-

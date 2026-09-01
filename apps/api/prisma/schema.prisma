@@ -250,6 +250,7 @@ model Booking {
   @@index([bookingDate])
   @@index([status])
   @@index([status, paymentStatus, paymentExpiresAt, id])
+  @@index([businessId, createdAt, id])
   @@unique([paymentProvider, paymentReferenceId])
   @@unique([paymentProvider, paymentIntentId])
   @@index([paymentReferenceId])
