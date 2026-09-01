@@ -878,6 +878,11 @@ button {
   background: var(--availo-color-warning);
 }
 
+.api-status[data-status="auth"]::before,
+.api-status[data-status="error"]::before {
+  background: var(--availo-color-danger);
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

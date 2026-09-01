@@ -7,7 +7,7 @@ import {
   mobileNavItems,
   navItems,
 } from "../lib/mock-data";
-import { fallbackOverview, fetchDashboardOverview, type DashboardOverview } from "../lib/api-data";
+import { DashboardAuthRequiredError, emptyOverview, fallbackOverview, fetchDashboardOverview, type DashboardOverview } from "../lib/api-data";
 
 type Screen = "dashboard" | "listings" | "create" | "booking" | "availability" | "customers" | "embed" | "analytics";
 type ListingTab = "details" | "pricing" | "availability" | "add-ons";
@@ -29,20 +29,22 @@ export function DashboardShell() {
   const [activeNav, setActiveNav] = useState<Screen>("dashboard");
   const [collapsed, setCollapsed] = useState(false);
   const [listingTab, setListingTab] = useState<ListingTab>("details");
-  const [overview, setOverview] = useState<DashboardOverview>(fallbackOverview);
-  const [apiStatus, setApiStatus] = useState<"loading" | "live" | "fallback">("loading");
+  const [overview, setOverview] = useState<DashboardOverview>(emptyOverview);
+  const [apiStatus, setApiStatus] = useState<"loading" | "live" | "auth" | "error">("loading");
 
   useEffect(() => {
     let active = true;
-    fetchDashboardOverview()
+    const accessToken = window.localStorage.getItem("availo.accessToken");
+    fetchDashboardOverview(accessToken)
       .then((nextOverview) => {
         if (!active) return;
         setOverview(nextOverview);
         setApiStatus("live");
       })
       .catch((error: unknown) => {
-        console.warn("Dashboard API unavailable; using local fallback data.", error);
-        if (active) setApiStatus("fallback");
+        if (!active) return;
+        setOverview(emptyOverview);
+        setApiStatus(error instanceof DashboardAuthRequiredError ? "auth" : "error");
       });
     return () => {
       active = false;
@@ -51,7 +53,7 @@ export function DashboardShell() {
 
   const activeListingCount = overview.listings.filter((listing) => listing.status === "active").length;
   const customerCount = new Set(overview.bookings.map((booking) => booking.name)).size;
-  const businessName = overview.business?.name ?? "Sample Tours Co.";
+  const businessName = apiStatus === "live" ? overview.business?.name ?? "Operator" : "Availo";
   const primaryListing = overview.listings[0] ?? fallbackOverview.listings[0]!;
   const primaryBooking = overview.bookings[0] ?? fallbackOverview.bookings[0]!;
 
@@ -159,17 +161,18 @@ export function DashboardShell() {
         </header>
 
         <div className="api-status" data-status={apiStatus}>
-          {apiStatus === "live" ? "Live API" : apiStatus === "loading" ? "Connecting API" : "Fallback data"}
+          {apiStatus === "live" ? "Live API" : apiStatus === "loading" ? "Connecting API" : apiStatus === "auth" ? "Sign in required" : "API unavailable"}
         </div>
 
-        {activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={() => setActiveNav("booking")} />}
-        {activeNav === "listings" && <ListingsManager listings={overview.listings} onCreate={() => setActiveNav("create")} />}
-        {activeNav === "create" && <CreateListing listingTab={listingTab} listings={overview.listings} setListingTab={setListingTab} />}
-        {activeNav === "booking" && <BookingDetail booking={primaryBooking} listing={primaryListing} />}
-        {activeNav === "availability" && <AvailabilityManager overview={overview} />}
-        {activeNav === "customers" && <CustomersManager bookings={overview.bookings} />}
-        {activeNav === "embed" && <EmbedSetup businessName={businessName} listing={primaryListing} />}
-        {activeNav === "analytics" && <AnalyticsManager overview={overview} />}
+        {apiStatus !== "live" && <DashboardUnavailable status={apiStatus} />}
+        {apiStatus === "live" && activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={() => setActiveNav("booking")} />}
+        {apiStatus === "live" && activeNav === "listings" && <ListingsManager listings={overview.listings} onCreate={() => setActiveNav("create")} />}
+        {apiStatus === "live" && activeNav === "create" && <CreateListing listingTab={listingTab} listings={overview.listings} setListingTab={setListingTab} />}
+        {apiStatus === "live" && activeNav === "booking" && <BookingDetail booking={primaryBooking} listing={primaryListing} />}
+        {apiStatus === "live" && activeNav === "availability" && <AvailabilityManager overview={overview} />}
+        {apiStatus === "live" && activeNav === "customers" && <CustomersManager bookings={overview.bookings} />}
+        {apiStatus === "live" && activeNav === "embed" && <EmbedSetup businessName={businessName} listing={primaryListing} />}
+        {apiStatus === "live" && activeNav === "analytics" && <AnalyticsManager overview={overview} />}
       </main>
 
       <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
@@ -204,6 +207,16 @@ function DashboardOverview({ onBooking, overview }: { onBooking: () => void; ove
       <ListingGrid listings={overview.listings} />
     </>
   );
+}
+
+function DashboardUnavailable({ status }: { status: "loading" | "auth" | "error" }) {
+  if (status === "loading") {
+    return <EmptyState className="dashboard-empty" icon="⊡" title="Connecting dashboard" body="Loading live operator data." />;
+  }
+  if (status === "auth") {
+    return <EmptyState className="dashboard-empty" icon="◎" title="Sign in required" body="Add an operator access token to continue." />;
+  }
+  return <EmptyState className="dashboard-empty" icon="◌" title="API unavailable" body="The dashboard could not load live operator data." />;
 }
 
 function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["bookings"]; onBooking: () => void }) {

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { DEMO_BUSINESS_ID } from "../common/tenant.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { jwtAccessSecret } from "./auth-context.js";
 
 const credentials = z.object({ email: z.string().email(), password: z.string().min(8) });
 
@@ -77,7 +78,7 @@ export class AuthController {
   private async issue(userId: string, email?: string) {
     const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { email: true, businessId: true, role: true } });
     const businessId = user.businessId ?? DEMO_BUSINESS_ID;
-    const accessToken = jwt.sign({ sub: userId, businessId, role: user.role }, process.env.JWT_ACCESS_SECRET ?? "local-dev-access-secret", {
+    const accessToken = jwt.sign({ sub: userId, businessId, role: user.role }, jwtAccessSecret(), {
       expiresIn: "15m"
     });
     const refreshToken = prefixedId("rt");

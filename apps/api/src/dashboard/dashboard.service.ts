@@ -1,7 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import type { BookingStatus, ListingStatus } from "@prisma/client";
 import { centsToCurrency } from "../common/money.js";
-import { DEMO_BUSINESS_ID } from "../common/tenant.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const statusMap: Record<ListingStatus, "active" | "draft" | "pending"> = {
@@ -24,15 +23,15 @@ const bookingStatusMap: Record<BookingStatus, "confirmed" | "pending" | "cancell
 export class DashboardService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
-  async overview() {
+  async overview(businessId: string) {
     const [business, listings, bookings] = await Promise.all([
-      this.prisma.business.findUniqueOrThrow({ where: { id: DEMO_BUSINESS_ID } }),
+      this.prisma.business.findUniqueOrThrow({ where: { id: businessId } }),
       this.prisma.listing.findMany({
-        where: { businessId: DEMO_BUSINESS_ID, status: { not: "archived" } },
+        where: { businessId, status: { not: "archived" } },
         orderBy: { createdAt: "asc" }
       }),
       this.prisma.booking.findMany({
-        where: { businessId: DEMO_BUSINESS_ID },
+        where: { businessId },
         include: { listing: true },
         orderBy: { createdAt: "desc" },
         take: 10
@@ -80,17 +79,17 @@ export class DashboardService {
         status: bookingStatusMap[booking.status]
       })),
       bookedDates: uniqueDays(bookings),
-      fullDates: await this.fullDates()
+      fullDates: await this.fullDates(businessId)
     };
   }
 
-  private async fullDates() {
+  private async fullDates(businessId: string) {
     const rows = await this.prisma.booking.groupBy({
       by: ["bookingDate"],
-      where: { businessId: DEMO_BUSINESS_ID, status: "confirmed" },
+      where: { businessId, status: "confirmed" },
       _sum: { guestCount: true }
     });
-    const listings = await this.prisma.listing.findMany({ where: { businessId: DEMO_BUSINESS_ID }, select: { capacity: true } });
+    const listings = await this.prisma.listing.findMany({ where: { businessId }, select: { capacity: true } });
     const maxCapacity = Math.max(...listings.map((listing) => listing.capacity), 1);
     return rows.filter((row) => (row._sum.guestCount ?? 0) >= maxCapacity).map((row) => Number(row.bookingDate.slice(-2)));
   }

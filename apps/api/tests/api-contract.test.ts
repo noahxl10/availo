@@ -27,7 +27,7 @@ describe("dashboard and public API contracts", () => {
   });
 
   it("returns dashboard data in the active frontend shape", async () => {
-    const overview = await dashboard.overview();
+    const overview = await dashboard.overview(DEMO_BUSINESS_ID);
 
     expect(overview.stats[0]).toMatchObject({ label: "Bookings this month" });
     expect(overview.listings[0]).toMatchObject({
@@ -68,35 +68,37 @@ describe("dashboard and public API contracts", () => {
   it("logs in, rotates refresh sessions, and logs out", async () => {
     await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
 
-    const login = await auth.login({ email: "owner@example-tours.invalid", password: "local-password" });
-    expect(login.ok).toBe(true);
-    if (!("refreshToken" in login)) throw new Error("Expected successful login");
-    expect(login.accessToken).toEqual(expect.any(String));
-    expect(login.refreshToken).toEqual(expect.any(String));
+    await withEnv({ JWT_ACCESS_SECRET: "api-contract-auth-secret" }, async () => {
+      const login = await auth.login({ email: "owner@example-tours.invalid", password: "local-password" });
+      expect(login.ok).toBe(true);
+      if (!("refreshToken" in login)) throw new Error("Expected successful login");
+      expect(login.accessToken).toEqual(expect.any(String));
+      expect(login.refreshToken).toEqual(expect.any(String));
 
-    await prisma.session.create({
-      data: {
-        id: prefixedId("ses"),
-        userId: "usr_demo_owner",
-        businessId: DEMO_BUSINESS_ID,
-        refreshTokenHash: await argon2.hash("not-the-presented-refresh-token"),
-        expiresAt: new Date(Date.now() + 60_000)
-      }
+      await prisma.session.create({
+        data: {
+          id: prefixedId("ses"),
+          userId: "usr_demo_owner",
+          businessId: DEMO_BUSINESS_ID,
+          refreshTokenHash: await argon2.hash("not-the-presented-refresh-token"),
+          expiresAt: new Date(Date.now() + 60_000)
+        }
+      });
+
+      const refresh = await auth.refresh({ refreshToken: login.refreshToken });
+      expect(refresh.ok).toBe(true);
+      if (!("refreshToken" in refresh)) throw new Error("Expected successful refresh");
+      expect(refresh.refreshToken).not.toBe(login.refreshToken);
+
+      const revoked = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: { not: null } } });
+      expect(revoked).toBe(1);
+
+      const logout = await auth.logout({ refreshToken: refresh.refreshToken });
+      expect(logout.ok).toBe(true);
+      const activeSessions = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } });
+      expect(activeSessions).toBe(1);
+      await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
     });
-
-    const refresh = await auth.refresh({ refreshToken: login.refreshToken });
-    expect(refresh.ok).toBe(true);
-    if (!("refreshToken" in refresh)) throw new Error("Expected successful refresh");
-    expect(refresh.refreshToken).not.toBe(login.refreshToken);
-
-    const revoked = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: { not: null } } });
-    expect(revoked).toBe(1);
-
-    const logout = await auth.logout({ refreshToken: refresh.refreshToken });
-    expect(logout.ok).toBe(true);
-    const activeSessions = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } });
-    expect(activeSessions).toBe(1);
-    await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
   });
 
   it("creates a capacity hold and checkout keeps booking pending until payment confirmation", async () => {

@@ -49,7 +49,7 @@ Public quote creation is rate limited per client IP by default for small self-ho
 
 ### First-run behavior
 
-The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL`; if the API is unavailable it falls back to local mock data so UI work can continue, but that fallback is not proof that the API is healthy.
+The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL` and requires an operator access token for live overview data; if authentication or the API is unavailable, it shows an explicit status instead of substituting mock data.
 
 The current admin experience is intentionally simple while Availo moves toward a full tenant-authenticated operator dashboard. Treat public availability, checkout capacity, sessions, CORS, and payment confirmation as the highest-risk areas when contributing.
 

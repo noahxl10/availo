@@ -33,7 +33,7 @@ npm run dev
 
 The dashboard will be available at `http://localhost:3000` and the API at `http://localhost:4000`.
 
-After seeding, the dashboard shows the demo operator data served by the API. If the dashboard cannot reach `NEXT_PUBLIC_API_BASE_URL`, it displays bundled fallback data for development; fix the API URL or API process before treating the install as working.
+After seeding, the dashboard can show the demo operator data served by the API once an operator access token is present in the browser under `localStorage["availo.accessToken"]`. If the dashboard cannot authenticate or reach `NEXT_PUBLIC_API_BASE_URL`, it displays an explicit status instead of substituting mock data; fix the API URL, auth token, or API process before treating the install as working.
 
 ## Configuration
 
