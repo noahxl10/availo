@@ -1,5 +1,7 @@
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
+import { configureApiHttp } from "./api-http.js";
 import { AppModule } from "./app.module.js";
 
 function corsOrigins() {
@@ -21,22 +23,9 @@ function apiPort() {
   return port;
 }
 
-function trustProxyHops() {
-  const raw = process.env.TRUST_PROXY_HOPS ?? "0";
-  const hops = Number(raw);
-  if (!Number.isInteger(hops) || hops < 0 || hops > 5) {
-    throw new Error("TRUST_PROXY_HOPS must be an integer between 0 and 5.");
-  }
-  return hops;
-}
-
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { rawBody: true });
-  const proxyHops = trustProxyHops();
-  if (proxyHops > 0) {
-    const server = app.getHttpAdapter().getInstance() as { set?: (setting: string, value: number) => void };
-    server.set?.("trust proxy", proxyHops);
-  }
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true, bodyParser: false });
+  configureApiHttp(app);
   app.enableCors({
     origin: corsOrigins(),
     credentials: true

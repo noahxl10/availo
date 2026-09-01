@@ -48,6 +48,7 @@ API variables live in `apps/api/.env`.
 | `API_BASE_URL` | Yes | Public API URL used for generated checkout links. |
 | `CORS_ORIGINS` | Recommended | Comma-separated list of dashboard origins allowed to call the API. |
 | `PORT` | No | API port. Defaults to `4000`. |
+| `API_BODY_LIMIT` | No | Maximum parsed JSON and URL-encoded request body size. Defaults to `256kb`. |
 | `PUBLIC_QUOTE_RATE_LIMIT` | No | Public quote attempts per client IP per window. Defaults to `6`; set `0` only as an emergency rollback to disable the limiter. |
 | `PUBLIC_QUOTE_RATE_WINDOW_SECONDS` | No | Public quote rate-limit window. Defaults to `900`, aligned with the 15-minute hold TTL. |
 | `PUBLIC_RATE_LIMIT_MAX_KEYS` | No | Maximum active in-memory client buckets for public rate limits. Defaults to `10000`. |
