@@ -120,16 +120,23 @@ export class ListingService {
     if (parsed.data.minGuests > parsed.data.maxGuests) {
       throw new BadRequestException("minGuests cannot be greater than maxGuests");
     }
+    if (parsed.data.maxGuests > parsed.data.capacity) {
+      throw new BadRequestException("capacity cannot be less than maxGuests");
+    }
     return parsed.data;
   }
 
-  private parseUpdate(body: unknown, current: { minGuests: number; maxGuests: number }) {
+  private parseUpdate(body: unknown, current: { minGuests: number; maxGuests: number; capacity: number }) {
     const parsed = listingInput.partial().safeParse(body);
     if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
     const nextMinGuests = parsed.data.minGuests ?? current.minGuests;
     const nextMaxGuests = parsed.data.maxGuests ?? current.maxGuests;
+    const nextCapacity = parsed.data.capacity ?? current.capacity;
     if (nextMinGuests > nextMaxGuests) {
       throw new BadRequestException("minGuests cannot be greater than maxGuests");
+    }
+    if (nextMaxGuests > nextCapacity) {
+      throw new BadRequestException("capacity cannot be less than maxGuests");
     }
     return parsed.data;
   }

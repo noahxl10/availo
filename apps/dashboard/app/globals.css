@@ -1401,6 +1401,21 @@ button {
   margin-bottom: var(--availo-space-4);
 }
 
+.form-message {
+  margin: 0 0 var(--availo-space-4);
+  color: var(--availo-color-muted);
+  font-size: var(--availo-font-size-sm);
+  font-weight: var(--availo-font-weight-semibold);
+}
+
+.form-message[data-tone="error"] {
+  color: var(--availo-color-danger);
+}
+
+.form-message[data-tone="success"] {
+  color: var(--availo-color-success);
+}
+
 .listing-tabs {
   display: inline-flex;
   gap: var(--availo-space-1);

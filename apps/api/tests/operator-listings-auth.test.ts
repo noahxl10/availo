@@ -118,6 +118,51 @@ describe("authenticated operator listing management", () => {
     }
   });
 
+  it("creates draft listings without exposing them through public booking APIs", async () => {
+    const fixture = await createListingFixture("tenant-draft-listings", "owner");
+
+    try {
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+        const token = await signToken(fixture.userId, fixture.businessId);
+        const created = await createListing(baseUrl, token, {
+          title: "Hidden Draft Paddle",
+          basePriceCents: 6500,
+          childPriceCents: 4500,
+          durationMinutes: 60,
+          minGuests: 1,
+          maxGuests: 8,
+          capacity: 8,
+          status: "draft"
+        });
+        expect(created.status).toBe(201);
+        const draft = (await created.json()) as { id: string; businessId: string; status: string; title: string };
+        expect(draft).toMatchObject({ businessId: fixture.businessId, status: "draft", title: "Hidden Draft Paddle" });
+
+        const operatorListings = await getListings(baseUrl, token);
+        expect(operatorListings.status).toBe(200);
+        await expect(operatorListings.json()).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: draft.id, status: "draft" })]));
+
+        const publicBusinessListings = await fetch(`${baseUrl}/public/businesses/${fixture.businessSlug}/listings`);
+        expect(publicBusinessListings.status).toBe(200);
+        const publicPayload = (await publicBusinessListings.json()) as { listings: { id: string }[] };
+        expect(publicPayload.listings.map((listing) => listing.id)).not.toContain(draft.id);
+
+        await expect(fetch(`${baseUrl}/public/listings/${draft.id}`)).resolves.toMatchObject({ status: 404 });
+        await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=2026-09-15`)).resolves.toMatchObject({ status: 404 });
+        await expect(
+          fetch(`${baseUrl}/public/bookings/quote`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ listingId: draft.id, date: "2026-09-15", startTime: "9:30 AM", adults: 1, children: 0, addOns: [] })
+          })
+        ).resolves.toMatchObject({ status: 404 });
+        await expect(prisma.auditLog.findFirst({ where: { businessId: fixture.businessId, userId: fixture.userId, entityId: draft.id, action: "listing.created" } })).resolves.toBeTruthy();
+      });
+    } finally {
+      await cleanupListingFixture(fixture.businessId);
+    }
+  });
+
   it("keeps viewers read-only before persistence", async () => {
     const fixture = await createListingFixture("tenant-viewer-listings", "viewer");
 
@@ -143,8 +188,14 @@ describe("authenticated operator listing management", () => {
     try {
       await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
         const token = await signToken(fixture.userId, fixture.businessId);
+        const beforeInvalidListingCount = await prisma.listing.count({ where: { businessId: fixture.businessId } });
+        const beforeInvalidAuditCount = await prisma.auditLog.count({ where: { businessId: fixture.businessId, userId: fixture.userId } });
         await expect(createListing(baseUrl, token, { ...validListingBody("Invalid Guests"), minGuests: 10, maxGuests: 2 })).resolves.toMatchObject({ status: 400 });
+        await expect(createListing(baseUrl, token, { ...validListingBody("Invalid Capacity"), maxGuests: 8, capacity: 1 })).resolves.toMatchObject({ status: 400 });
         await expect(updateListing(baseUrl, fixture.listingId, token, { minGuests: 99 })).resolves.toMatchObject({ status: 400 });
+        await expect(updateListing(baseUrl, fixture.listingId, token, { maxGuests: 8, capacity: 1 })).resolves.toMatchObject({ status: 400 });
+        await expect(prisma.listing.count({ where: { businessId: fixture.businessId } })).resolves.toBe(beforeInvalidListingCount);
+        await expect(prisma.auditLog.count({ where: { businessId: fixture.businessId, userId: fixture.userId } })).resolves.toBe(beforeInvalidAuditCount);
         await expect(updateListing(baseUrl, otherFixture.listingId, token, { title: "Cross Tenant Update" })).resolves.toMatchObject({ status: 404 });
         await expect(archiveListing(baseUrl, otherFixture.listingId, token)).resolves.toMatchObject({ status: 404 });
         await expect(prisma.listing.findUniqueOrThrow({ where: { id: otherFixture.listingId } })).resolves.toMatchObject({ title: "Listing tenant-listing-validation-hidden", status: "active" });
@@ -209,12 +260,13 @@ describe("authenticated operator listing management", () => {
     const businessId = prefixedId("biz");
     const userId = prefixedId("usr");
     const listingId = prefixedId("lst");
+    const businessSlug = `${slugSeed}-${businessId}`;
 
     await prisma.business.create({
       data: {
         id: businessId,
         name: `Operator ${slugSeed}`,
-        slug: `${slugSeed}-${businessId}`,
+        slug: businessSlug,
         status: "active",
         timezone: "America/Denver",
         currency: "USD"
@@ -238,7 +290,7 @@ describe("authenticated operator listing management", () => {
       }
     });
 
-    return { businessId, userId, listingId };
+    return { businessId, businessSlug, userId, listingId };
   }
 
   function validListingBody(title: string) {

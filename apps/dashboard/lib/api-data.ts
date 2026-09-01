@@ -74,6 +74,25 @@ export type DashboardLoginInput = {
   password: string;
 };
 
+export type DashboardListingDraftInput = {
+  title: string;
+  description?: string;
+  category: string;
+  basePriceCents: number;
+  childPriceCents?: number;
+  durationMinutes: number;
+  minGuests: number;
+  maxGuests: number;
+  capacity: number;
+  meetingPoint?: string;
+};
+
+export type DashboardListingDraft = {
+  id: string;
+  title: string;
+  status: "draft";
+};
+
 export const fallbackOverview: DashboardOverview = {
   stats,
   bookings,
@@ -114,6 +133,18 @@ export class DashboardBookingNotFoundError extends Error {
   }
 }
 
+export class DashboardListingForbiddenError extends Error {
+  constructor() {
+    super("Listing access denied");
+  }
+}
+
+export class DashboardListingValidationError extends Error {
+  constructor(message = "Listing input is invalid") {
+    super(message);
+  }
+}
+
 export async function fetchDashboardOverview(accessToken: string | null): Promise<DashboardOverview> {
   if (!accessToken) throw new DashboardAuthRequiredError();
   const response = await fetch(`${apiBaseUrl()}/dashboard/overview`, { cache: "no-store", headers: { authorization: `Bearer ${accessToken}` } });
@@ -132,6 +163,21 @@ export async function fetchDashboardBookingDetail(bookingId: string, accessToken
   if (response.status === 404) throw new DashboardBookingNotFoundError();
   if (!response.ok) throw new Error(`Dashboard booking API returned ${response.status}`);
   return normalizeDashboardBookingDetail(await response.json());
+}
+
+export async function createDashboardListingDraft(input: DashboardListingDraftInput, accessToken: string | null): Promise<DashboardListingDraft> {
+  if (!accessToken) throw new DashboardAuthRequiredError();
+  const response = await fetch(`${apiBaseUrl()}/listings`, {
+    body: JSON.stringify({ ...input, status: "draft" }),
+    cache: "no-store",
+    headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+    method: "POST"
+  });
+  if (response.status === 401) throw new DashboardAuthRequiredError();
+  if (response.status === 403) throw new DashboardListingForbiddenError();
+  if (response.status === 400) throw new DashboardListingValidationError(validationMessage(await safeJson(response)));
+  if (!response.ok) throw new Error(`Dashboard listing API returned ${response.status}`);
+  return normalizeDashboardListingDraft(await response.json());
 }
 
 export async function loginDashboardSession(input: DashboardLoginInput): Promise<DashboardSession> {
@@ -206,6 +252,16 @@ export function normalizeDashboardBookingDetail(payload: unknown): DashboardBook
       }
     }))
   };
+}
+
+export function normalizeDashboardListingDraft(payload: unknown): DashboardListingDraft {
+  if (!payload || typeof payload !== "object") throw new Error("Dashboard listing API returned an invalid draft");
+  if ("refreshToken" in payload) throw new Error("Dashboard listing API returned an unsafe refresh token");
+  const listing = payload as Partial<DashboardListingDraft>;
+  if (typeof listing.id !== "string" || typeof listing.title !== "string" || listing.status !== "draft") {
+    throw new Error("Dashboard listing API returned an invalid draft");
+  }
+  return { id: listing.id, title: listing.title, status: "draft" };
 }
 
 function apiBaseUrl() {
@@ -345,6 +401,12 @@ function rateLimitMessage(payload: unknown) {
   if (!payload || typeof payload !== "object") return undefined;
   const message = (payload as { message?: unknown }).message;
   return typeof message === "string" ? message : undefined;
+}
+
+function validationMessage(payload: unknown) {
+  if (!payload || typeof payload !== "object") return undefined;
+  const message = (payload as { message?: unknown }).message;
+  return typeof message === "string" ? message : "Listing input is invalid";
 }
 
 function isNumberArray(value: unknown): value is number[] {

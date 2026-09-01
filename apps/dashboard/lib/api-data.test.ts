@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DashboardAuthRequiredError,
   DashboardBookingNotFoundError,
+  DashboardListingForbiddenError,
+  DashboardListingValidationError,
   DashboardLoginRejectedError,
   DashboardRateLimitedError,
+  createDashboardListingDraft,
   fetchDashboardBookingDetail,
   fetchDashboardOverview,
   loginDashboardSession,
@@ -78,6 +81,68 @@ describe("dashboard API data", () => {
     await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toBeInstanceOf(DashboardBookingNotFoundError);
     await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toThrow("Dashboard booking API returned an invalid detail");
     await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toThrow("Dashboard booking API returned an invalid detail");
+  });
+
+  it("creates draft listings with bearer auth and never sends tenant-owned fields", async () => {
+    process.env.NEXT_PUBLIC_API_BASE_URL = "https://api.availo.test/";
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ id: "lst_created", title: "Sunset Paddle", status: "draft", businessId: "biz_internal" }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createDashboardListingDraft(
+        {
+          title: "Sunset Paddle",
+          category: "Tour",
+          basePriceCents: 6500,
+          childPriceCents: 4500,
+          durationMinutes: 60,
+          minGuests: 1,
+          maxGuests: 8,
+          capacity: 8,
+          description: "Evening harbor trip.",
+          meetingPoint: "100 Harbor Way"
+        },
+        "access-token"
+      )
+    ).resolves.toEqual({ id: "lst_created", title: "Sunset Paddle", status: "draft" });
+
+    const requestInit = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const request = JSON.parse(String(requestInit?.body));
+    expect(fetchMock).toHaveBeenCalledWith("https://api.availo.test/listings", expect.objectContaining({
+      cache: "no-store",
+      headers: { authorization: "Bearer access-token", "content-type": "application/json" },
+      method: "POST"
+    }));
+    expect(request).toMatchObject({ title: "Sunset Paddle", status: "draft" });
+    expect(request).not.toHaveProperty("businessId");
+    expect(request).not.toHaveProperty("userId");
+  });
+
+  it("maps draft listing auth, permission, validation, and malformed responses", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("{}", { status: 401 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 403 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: "minGuests cannot be greater than maxGuests" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "lst_created", title: "Unsafe", status: "draft", refreshToken: "v1.unsafe" }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "lst_created", title: "Active", status: "active" }), { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const input = {
+      title: "Sunset Paddle",
+      category: "Tour",
+      basePriceCents: 6500,
+      durationMinutes: 60,
+      minGuests: 1,
+      maxGuests: 8,
+      capacity: 8
+    };
+
+    await expect(createDashboardListingDraft(input, "access-token")).rejects.toBeInstanceOf(DashboardAuthRequiredError);
+    await expect(createDashboardListingDraft(input, "access-token")).rejects.toBeInstanceOf(DashboardListingForbiddenError);
+    await expect(createDashboardListingDraft(input, "access-token")).rejects.toThrow("minGuests cannot be greater than maxGuests");
+    await expect(createDashboardListingDraft(input, "access-token")).rejects.toThrow("Dashboard listing API returned an unsafe refresh token");
+    await expect(createDashboardListingDraft(input, "access-token")).rejects.toThrow("Dashboard listing API returned an invalid draft");
   });
 
   it("logs in through the browser endpoint with credentialed no-store fetch", async () => {
