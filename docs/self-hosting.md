@@ -48,6 +48,11 @@ API variables live in `apps/api/.env`.
 | `API_BASE_URL` | Yes | Public API URL used for generated checkout links. |
 | `CORS_ORIGINS` | Recommended | Comma-separated list of dashboard origins allowed to call the API. |
 | `PORT` | No | API port. Defaults to `4000`. |
+| `PUBLIC_QUOTE_RATE_LIMIT` | No | Public quote attempts per client IP per window. Defaults to `6`; set `0` only as an emergency rollback to disable the limiter. |
+| `PUBLIC_QUOTE_RATE_WINDOW_SECONDS` | No | Public quote rate-limit window. Defaults to `900`, aligned with the 15-minute hold TTL. |
+| `PUBLIC_RATE_LIMIT_MAX_KEYS` | No | Maximum active in-memory client buckets for public rate limits. Defaults to `10000`. |
+| `PUBLIC_BOOKING_HORIZON_DAYS` | No | Maximum quote date horizon, in days from the API server date. Defaults to `548`. |
+| `TRUST_PROXY_HOPS` | No | Number of trusted reverse-proxy hops for client IP detection. Defaults to `0`, which ignores forwarded IP headers. |
 | `STRIPE_SECRET_KEY` | No | Stripe API key for future real payment flows. |
 | `STRIPE_WEBHOOK_SECRET` | No | Enables Stripe webhook signature requirements when set. |
 | `ALLOW_MOCK_PAYMENTS` | No | Local/demo-only opt-in for mock checkout confirmation. Never enable in production. |
@@ -69,6 +74,8 @@ npm run start:dashboard
 For production, run the API and dashboard as separate long-running services. Put both behind HTTPS and set the public URLs in `apps/api/.env` and `apps/dashboard/.env.local`.
 
 Do not deploy with `CORS_ORIGINS="*"`. The API uses credentialed CORS and rejects wildcard origins at startup.
+
+Public quote creation has a small in-process rate limiter for single-node self-hosted installs. It is not shared across multiple API replicas. If active client buckets reach `PUBLIC_RATE_LIMIT_MAX_KEYS`, newly seen clients fail closed with `429` until older buckets expire; raise the cap only when the host has enough memory. If the API runs behind one trusted reverse proxy, set `TRUST_PROXY_HOPS="1"` and configure the proxy to strip client-supplied forwarding headers before adding its own; otherwise leave `TRUST_PROXY_HOPS="0"` so spoofed `X-Forwarded-For` values are ignored.
 
 Mock checkout is intentionally local-only. Production checkout fails closed until a real payment provider is configured in code; setting Stripe webhook secrets verifies inbound Stripe events but does not create Stripe Checkout sessions by itself.
 

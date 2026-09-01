@@ -21,8 +21,22 @@ function apiPort() {
   return port;
 }
 
+function trustProxyHops() {
+  const raw = process.env.TRUST_PROXY_HOPS ?? "0";
+  const hops = Number(raw);
+  if (!Number.isInteger(hops) || hops < 0 || hops > 5) {
+    throw new Error("TRUST_PROXY_HOPS must be an integer between 0 and 5.");
+  }
+  return hops;
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  const proxyHops = trustProxyHops();
+  if (proxyHops > 0) {
+    const server = app.getHttpAdapter().getInstance() as { set?: (setting: string, value: number) => void };
+    server.set?.("trust proxy", proxyHops);
+  }
   app.enableCors({
     origin: corsOrigins(),
     credentials: true

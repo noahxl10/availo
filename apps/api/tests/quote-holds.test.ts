@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEMO_BUSINESS_ID } from "../src/common/tenant.js";
 import { prefixedId } from "../src/common/ids.js";
+import { PublicController } from "../src/public/public.controller.js";
+import { PublicQuoteRateLimiter } from "../src/public/public-rate-limit.js";
 import { PublicService } from "../src/public/public.service.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
 
@@ -139,9 +141,153 @@ describe("quote hold capacity lifecycle", () => {
     });
   });
 
-  async function createListingFixture({ capacity }: { capacity: number }) {
+  it("rate limits public quote creation before creating another hold", async () => {
+    const fixture = await createListingFixture({ capacity: 8 });
+
+    await withEnv({ PUBLIC_QUOTE_RATE_LIMIT: "2", PUBLIC_QUOTE_RATE_WINDOW_SECONDS: "900", PUBLIC_RATE_LIMIT_MAX_KEYS: "100" }, async () => {
+      const limiter = new PublicQuoteRateLimiter();
+      const controller = new PublicController(publicApi, limiter);
+      const body = quoteBody(fixture);
+
+      try {
+        await controller.quote(body, { ip: "203.0.113.10", headers: { "x-forwarded-for": "198.51.100.20" } } as never, responseRecorder());
+        await controller.quote(body, { ip: "203.0.113.10", headers: { "x-forwarded-for": "198.51.100.21" } } as never, responseRecorder());
+        const beforeRejected = await prisma.bookingHold.count({ where: { listingId: fixture.listingId } });
+        const rejectedResponse = responseRecorder();
+
+        expect(() => controller.quote(body, { ip: "203.0.113.10", headers: { "x-forwarded-for": "198.51.100.22" } } as never, rejectedResponse)).toThrow(
+          "Too many quote requests"
+        );
+
+        expect(await prisma.bookingHold.count({ where: { listingId: fixture.listingId } })).toBe(beforeRejected);
+        expect(rejectedResponse.headers["retry-after"]).toEqual(expect.stringMatching(/^\d+$/));
+        expect(rejectedResponse.headers["ratelimit-limit"]).toBe("2");
+        expect(rejectedResponse.headers["ratelimit-remaining"]).toBe("0");
+        expect(Number(rejectedResponse.headers["ratelimit-reset"])).toBeLessThanOrEqual(900);
+
+        await controller.quote(body, { ip: "203.0.113.11" } as never, responseRecorder());
+        expect(await prisma.bookingHold.count({ where: { listingId: fixture.listingId } })).toBe(beforeRejected + 1);
+      } finally {
+        await cleanupListingFixture(fixture.listingId);
+      }
+    });
+  });
+
+  it("resets quote rate-limit windows deterministically and caps active clients", async () => {
+    await withEnv({ PUBLIC_QUOTE_RATE_LIMIT: "2", PUBLIC_QUOTE_RATE_WINDOW_SECONDS: "60", PUBLIC_RATE_LIMIT_MAX_KEYS: "1" }, async () => {
+      const limiter = new PublicQuoteRateLimiter();
+      const start = new Date("2026-08-31T00:00:00.000Z");
+
+      expect(limiter.consume({ source: "2001:db8::1", now: start }).allowed).toBe(true);
+      expect(limiter.consume({ source: "2001:DB8::1", now: start }).allowed).toBe(true);
+      expect(limiter.consume({ source: "2001:db8::1", now: new Date(start.getTime() + 59_999) }).allowed).toBe(false);
+      expect(limiter.consume({ source: "2001:db8::1", now: new Date(start.getTime() + 60_000) }).allowed).toBe(true);
+      expect(limiter.consume({ source: "2001:db8::2", now: new Date(start.getTime() + 60_001) }).allowed).toBe(false);
+    });
+  });
+
+  it("rejects bounded quote payload violations before creating holds", async () => {
+    const fixture = await createListingFixture({ capacity: 8 });
+    const addOnId = prefixedId("add");
+    await prisma.addOn.create({
+      data: {
+        id: addOnId,
+        businessId: DEMO_BUSINESS_ID,
+        listingId: fixture.listingId,
+        name: "Fixture dry bag",
+        priceCents: 500,
+        pricingType: "per_booking",
+        minQuantity: 0,
+        maxQuantity: 2
+      }
+    });
+
+    const invalidBodies = [
+      { ...quoteBody(fixture), date: "2026-02-29" },
+      { ...quoteBody(fixture), listingId: "x".repeat(81) },
+      { ...quoteBody(fixture), startTime: "x".repeat(33) },
+      { ...quoteBody(fixture), adults: 101 },
+      { ...quoteBody(fixture), addOns: Array.from({ length: 13 }, () => ({ id: addOnId, quantity: 1 })) },
+      { ...quoteBody(fixture), addOns: [{ id: addOnId, quantity: 1 }, { id: addOnId, quantity: 1 }] },
+      { ...quoteBody(fixture), addOns: [{ id: addOnId, quantity: 101 }] }
+    ];
+
+    try {
+      for (const body of invalidBodies) {
+        await expect(publicApi.quote(body)).rejects.toThrow();
+      }
+      expect(await prisma.bookingHold.count({ where: { listingId: fixture.listingId } })).toBe(0);
+    } finally {
+      await cleanupListingFixture(fixture.listingId);
+    }
+  });
+
+  it("enforces quote date horizon boundaries before creating holds", async () => {
+    const fixture = await createListingFixture({ capacity: 8 });
+
+    await withEnv({ PUBLIC_BOOKING_HORIZON_DAYS: "30" }, async () => {
+      try {
+        await expect(publicApi.quote({ ...quoteBody(fixture), date: dateAfterDays(-1) })).rejects.toThrow();
+        await expect(publicApi.quote({ ...quoteBody(fixture), date: dateAfterDays(31) })).rejects.toThrow();
+        await expect(publicApi.quote({ ...quoteBody(fixture), date: dateAfterDays(30) })).resolves.toMatchObject({ holdId: expect.stringMatching(/^hold_/) });
+        expect(await prisma.bookingHold.count({ where: { listingId: fixture.listingId } })).toBe(1);
+      } finally {
+        await cleanupListingFixture(fixture.listingId);
+      }
+    });
+  });
+
+  it("allows checkout for an unexpired hold whose booking date crossed out of the quote horizon", async () => {
+    const fixture = await createListingFixture({ capacity: 4, date: dateAfterDays(-1) });
+    const quote = {
+      listingId: fixture.listingId,
+      bookingDate: fixture.date,
+      startTime: fixture.startTime,
+      guestCount: 2,
+      adultCount: 2,
+      childCount: 0,
+      subtotalCents: 10000,
+      taxCents: 0,
+      platformFeeCents: 600,
+      processorFeeCents: 0,
+      totalCents: 10600,
+      addOns: []
+    };
+    const hold = await prisma.bookingHold.create({
+      data: {
+        id: prefixedId("hold"),
+        businessId: DEMO_BUSINESS_ID,
+        listingId: fixture.listingId,
+        bookingDate: fixture.date,
+        startTime: fixture.startTime,
+        guestCount: 2,
+        quoteJson: JSON.stringify(quote),
+        expiresAt: new Date(Date.now() + 60_000)
+      }
+    });
+
+    await withEnv({ ALLOW_MOCK_PAYMENTS: "true" }, async () => {
+      try {
+        await expect(
+          publicApi.checkout({
+            holdId: hold.id,
+            listingId: fixture.listingId,
+            date: fixture.date,
+            startTime: fixture.startTime,
+            adults: 2,
+            children: 0,
+            addOns: [],
+            customer: { name: "Boundary Tester", email: "boundary-checkout@example.invalid" }
+          })
+        ).resolves.toMatchObject({ status: "pending_payment" });
+      } finally {
+        await cleanupListingFixture(fixture.listingId);
+      }
+    });
+  });
+
+  async function createListingFixture({ capacity, date = dateAfterDays(30) }: { capacity: number; date?: string }) {
     const listingId = prefixedId("lst");
-    const date = "2026-06-06";
     const startTime = "9:00 AM";
     await prisma.listing.create({
       data: {
@@ -171,22 +317,42 @@ describe("quote hold capacity lifecycle", () => {
         endTime: "10:00 AM",
         slotIntervalMinutes: 60,
         capacity,
-        effectiveStartDate: "2026-06-01",
-        effectiveEndDate: "2026-06-30"
+        effectiveStartDate: date,
+        effectiveEndDate: date
       }
     });
     return { listingId, date, startTime };
   }
 
   function quoteExactCapacity(api: PublicService, fixture: { listingId: string; date: string; startTime: string }) {
-    return api.quote({
+    return api.quote(quoteBody(fixture));
+  }
+
+  function quoteBody(fixture: { listingId: string; date: string; startTime: string }) {
+    return {
       listingId: fixture.listingId,
       date: fixture.date,
       startTime: fixture.startTime,
       adults: 2,
       children: 0,
       addOns: []
-    });
+    };
+  }
+
+  function responseRecorder() {
+    const headers: Record<string, string> = {};
+    return {
+      headers,
+      setHeader(name: string, value: string) {
+        headers[name.toLowerCase()] = value;
+      }
+    };
+  }
+
+  function dateAfterDays(days: number) {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
   }
 
   async function cleanupListingFixture(listingId: string) {

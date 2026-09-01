@@ -6,26 +6,42 @@ import { platformFeeCents } from "../common/money.js";
 import { assertPaymentProviderConfigured } from "../payments/payment-config.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
-const quoteInput = z.object({
-  listingId: z.string().min(1),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  startTime: z.string().min(1),
-  adults: z.number().int().min(1),
-  children: z.number().int().min(0).default(0),
-  addOns: z.array(z.object({ id: z.string(), quantity: z.number().int().positive() })).default([])
+const quoteInputBase = z.object({
+  listingId: z.string().min(1).max(80),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isRealCalendarDate, "Date must be a real calendar date"),
+  startTime: z.string().min(1).max(32),
+  adults: z.number().int().min(1).max(100),
+  children: z.number().int().min(0).max(100).default(0),
+  addOns: z.array(z.object({ id: z.string().min(1).max(80), quantity: z.number().int().positive().max(100) })).max(12).default([])
 });
 
-const checkoutInput = quoteInput.extend({
+const quoteInput = quoteInputBase.extend({
+  date: quoteInputBase.shape.date.refine(isWithinBookingHorizon, "Date is outside the booking horizon")
+}).superRefine(rejectDuplicateAddOns);
+
+const checkoutInput = quoteInputBase.extend({
   holdId: z.string().min(1),
   customer: z.object({
     name: z.string().min(1),
     email: z.string().email(),
     phone: z.string().optional()
   })
-});
+}).superRefine(rejectDuplicateAddOns);
+
+function rejectDuplicateAddOns(input: z.infer<typeof quoteInputBase>, context: z.RefinementCtx) {
+  const addOnIds = new Set<string>();
+  for (const addOn of input.addOns) {
+    if (addOnIds.has(addOn.id)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["addOns"], message: "Duplicate add-ons are not allowed" });
+      return;
+    }
+    addOnIds.add(addOn.id);
+  }
+}
 
 const HOLD_TTL_MS = 15 * 60 * 1000;
 const CAPACITY_RETRY_LIMIT = 3;
+const DEFAULT_BOOKING_HORIZON_DAYS = 548;
 
 @Injectable()
 export class PublicService {
@@ -220,6 +236,37 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
   const parsed = schema.safeParse(body);
   if (!parsed.success) throw new BadRequestException(parsed.error.flatten());
   return parsed.data;
+}
+
+function isRealCalendarDate(value: string) {
+  const [year, month, day] = parseYmd(value);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function isWithinBookingHorizon(value: string) {
+  const horizonDays = positiveEnvInt("PUBLIC_BOOKING_HORIZON_DAYS", DEFAULT_BOOKING_HORIZON_DAYS);
+  const [year, month, day] = parseYmd(value);
+  const bookingDate = Date.UTC(year, month - 1, day);
+  const now = new Date();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return bookingDate >= today && bookingDate <= today + horizonDays * 24 * 60 * 60 * 1000;
+}
+
+function parseYmd(value: string): [number, number, number] {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return [Number.NaN, Number.NaN, Number.NaN];
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function positiveEnvInt(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return value;
 }
 
 type QuoteInput = z.infer<typeof quoteInput>;

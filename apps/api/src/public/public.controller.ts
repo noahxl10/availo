@@ -1,9 +1,13 @@
-import { Body, Controller, Get, Inject, Param, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, HttpException, HttpStatus, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
+import { PublicQuoteRateLimiter } from "./public-rate-limit.js";
 import { PublicService } from "./public.service.js";
 
 @Controller("public")
 export class PublicController {
-  constructor(@Inject(PublicService) private readonly publicApi: PublicService) {}
+  constructor(
+    @Inject(PublicService) private readonly publicApi: PublicService,
+    @Inject(PublicQuoteRateLimiter) private readonly quoteRateLimiter: PublicQuoteRateLimiter
+  ) {}
 
   @Get("businesses/:slug/listings")
   businessListings(@Param("slug") slug: string) {
@@ -21,7 +25,16 @@ export class PublicController {
   }
 
   @Post("bookings/quote")
-  quote(@Body() body: unknown) {
+  quote(@Body() body: unknown, @Req() request: RequestLike, @Res({ passthrough: true }) response: ResponseLike) {
+    const rateLimit = this.quoteRateLimiter.consume({
+      source: clientSource(request)
+    });
+    setRateLimitHeaders(response, rateLimit);
+    if (!rateLimit.allowed) {
+      throw new HttpException({
+        message: "Too many quote requests. Please try again later."
+      }, HttpStatus.TOO_MANY_REQUESTS);
+    }
     return this.publicApi.quote(body);
   }
 
@@ -34,4 +47,26 @@ export class PublicController {
   confirmation(@Param("id") id: string) {
     return this.publicApi.confirmation(id);
   }
+}
+
+type RequestLike = {
+  ip?: string;
+  socket?: { remoteAddress?: string };
+};
+
+type ResponseLike = {
+  setHeader(name: string, value: string): void;
+};
+
+function clientSource(request: RequestLike) {
+  return request.ip ?? request.socket?.remoteAddress ?? "unknown";
+}
+
+function setRateLimitHeaders(response: ResponseLike, rateLimit: ReturnType<PublicQuoteRateLimiter["consume"]>) {
+  if (rateLimit.disabled) return;
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("RateLimit-Limit", String(rateLimit.limit));
+  response.setHeader("RateLimit-Remaining", String(Math.max(rateLimit.remaining, 0)));
+  response.setHeader("RateLimit-Reset", String(rateLimit.retryAfterSeconds));
+  if (!rateLimit.allowed) response.setHeader("Retry-After", String(rateLimit.retryAfterSeconds));
 }

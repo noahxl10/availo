@@ -103,7 +103,7 @@ describe("dashboard and public API contracts", () => {
     await withEnv({ ALLOW_MOCK_PAYMENTS: "true" }, async () => {
       const quote = await publicApi.quote({
         listingId: "lst_harbor_kayak_tour",
-        date: "2026-05-12",
+        date: dateAfterDays(14),
         startTime: "9:30 AM",
         adults: 2,
         children: 1,
@@ -115,7 +115,7 @@ describe("dashboard and public API contracts", () => {
       const checkout = await publicApi.checkout({
         holdId: quote.holdId,
         listingId: "lst_harbor_kayak_tour",
-        date: "2026-05-12",
+        date: dateAfterDays(14),
         startTime: "9:30 AM",
         adults: 2,
         children: 1,
@@ -129,7 +129,7 @@ describe("dashboard and public API contracts", () => {
           publicApi.checkout({
             holdId: quote.holdId,
             listingId: "lst_harbor_kayak_tour",
-            date: "2026-05-12",
+            date: dateAfterDays(14),
             startTime: "9:30 AM",
             adults: 2,
             children: 1,
@@ -138,7 +138,7 @@ describe("dashboard and public API contracts", () => {
           })
         ).rejects.toThrow();
 
-        const availability = await publicApi.availability("lst_harbor_kayak_tour", "2026-05-12");
+        const availability = await publicApi.availability("lst_harbor_kayak_tour", dateAfterDays(14));
         expect(availability.slots.find((slot) => slot.startTime === "9:30 AM")?.capacityRemaining).toBeLessThan(12);
 
         const confirmation = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
@@ -159,7 +159,7 @@ describe("dashboard and public API contracts", () => {
   it("keeps mock payments disabled by default and in production", async () => {
     const quote = await publicApi.quote({
       listingId: "lst_harbor_kayak_tour",
-      date: "2026-05-13",
+      date: dateAfterDays(15),
       startTime: "9:30 AM",
       adults: 1,
       children: 0,
@@ -171,7 +171,7 @@ describe("dashboard and public API contracts", () => {
         publicApi.checkout({
           holdId: quote.holdId,
           listingId: "lst_harbor_kayak_tour",
-          date: "2026-05-13",
+          date: dateAfterDays(15),
           startTime: "9:30 AM",
           adults: 1,
           children: 0,
@@ -325,7 +325,7 @@ describe("dashboard and public API contracts", () => {
         listingId: "lst_harbor_kayak_tour",
         customerName: "Payment Tester",
         customerEmail,
-        bookingDate: "2026-05-14",
+        bookingDate: dateAfterDays(16),
         startTime: "11:00 AM",
         endTime: "12:00 PM",
         guestCount: 1,
@@ -376,5 +376,11 @@ describe("dashboard and public API contracts", () => {
   function stripeSignature(body: string, secret: string, timestamp = Math.floor(Date.now() / 1000)) {
     const digest = createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
     return `t=${timestamp},v1=${digest}`;
+  }
+
+  function dateAfterDays(days: number) {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
   }
 });

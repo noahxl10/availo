@@ -11,9 +11,10 @@ import { PublicController } from "./public/public.controller.js";
 import { PublicService } from "./public/public.service.js";
 import { PaymentController } from "./payments/payment.controller.js";
 import { PrismaService } from "./prisma/prisma.service.js";
+import { PublicQuoteRateLimiter } from "./public/public-rate-limit.js";
 
 @Module({
   controllers: [AuthController, BusinessController, DashboardController, ListingController, BookingController, PublicController, PaymentController],
-  providers: [PrismaService, DashboardService, ListingService, BookingService, PublicService]
+  providers: [PrismaService, DashboardService, ListingService, BookingService, PublicService, PublicQuoteRateLimiter]
 })
 export class AppModule {}
