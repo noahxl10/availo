@@ -162,6 +162,8 @@ GET   /business/public/:slug
    - user login
    - user logout
 
+Operator `GET /business` and `PATCH /business` derive the business from the verified access token. All active operator roles can read settings; only owner/admin can update settings. First-business `POST /business` remains a separate onboarding flow until ownership and session issuance are fully designed.
+
 ## Phase 5: Listings
 
 1. Implement:
