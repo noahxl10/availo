@@ -7,10 +7,34 @@ import {
   mobileNavItems,
   navItems,
 } from "../lib/mock-data";
-import { DashboardAuthRequiredError, emptyOverview, fallbackOverview, fetchDashboardOverview, type DashboardOverview } from "../lib/api-data";
+import {
+  DashboardAuthRequiredError,
+  DashboardLoginRejectedError,
+  DashboardRateLimitedError,
+  emptyOverview,
+  fallbackOverview,
+  fetchDashboardOverview,
+  loginDashboardSession,
+  type DashboardLoginInput,
+  type DashboardOverview,
+  type DashboardUser
+} from "../lib/api-data";
+import {
+  DashboardSessionCoordinationError,
+  clearMemoryDashboardSession,
+  currentDashboardSession,
+  initializeDashboardSessionChannel,
+  logoutDashboardBrowserSession,
+  refreshDashboardSessionAfterStaleToken,
+  restoreDashboardSession,
+  setMemoryDashboardSession,
+  subscribeDashboardSession,
+  supportsDashboardSessionCoordination
+} from "../lib/browser-session";
 
 type Screen = "dashboard" | "listings" | "create" | "booking" | "availability" | "customers" | "embed" | "analytics";
 type ListingTab = "details" | "pricing" | "availability" | "add-ons";
+type ApiStatus = "loading" | "live" | "auth" | "error" | "unsupported";
 
 const addonPrices = [28, 17, 0] as const;
 
@@ -30,26 +54,88 @@ export function DashboardShell() {
   const [collapsed, setCollapsed] = useState(false);
   const [listingTab, setListingTab] = useState<ListingTab>("details");
   const [overview, setOverview] = useState<DashboardOverview>(emptyOverview);
-  const [apiStatus, setApiStatus] = useState<"loading" | "live" | "auth" | "error">("loading");
+  const [apiStatus, setApiStatus] = useState<ApiStatus>("loading");
+  const [operator, setOperator] = useState<DashboardUser | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [submittingLogin, setSubmittingLogin] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   useEffect(() => {
     let active = true;
-    const accessToken = window.localStorage.getItem("availo.accessToken");
-    fetchDashboardOverview(accessToken)
-      .then((nextOverview) => {
+    initializeDashboardSessionChannel();
+    const unsubscribe = subscribeDashboardSession((session) => {
+      if (!active) return;
+      if (session) {
+        setOperator(session.user);
+        return;
+      }
+      setOperator(null);
+      setOverview(emptyOverview);
+      setApiStatus("auth");
+    });
+    if (!supportsDashboardSessionCoordination()) {
+      setApiStatus("unsupported");
+      return () => {
+        active = false;
+        unsubscribe();
+      };
+    }
+
+    restoreDashboardSession()
+      .then((session) => loadOverviewWithOneRefresh(session.accessToken))
+      .then(({ session, nextOverview }) => {
         if (!active) return;
+        setOperator(session.user);
         setOverview(nextOverview);
         setApiStatus("live");
       })
       .catch((error: unknown) => {
         if (!active) return;
         setOverview(emptyOverview);
-        setApiStatus(error instanceof DashboardAuthRequiredError ? "auth" : "error");
+        setApiStatus(error instanceof DashboardAuthRequiredError || error instanceof DashboardLoginRejectedError ? "auth" : error instanceof DashboardSessionCoordinationError ? "unsupported" : "error");
       });
     return () => {
       active = false;
+      unsubscribe();
     };
   }, []);
+
+  async function handleLogin(input: DashboardLoginInput) {
+    setSubmittingLogin(true);
+    setLoginError(null);
+    try {
+      if (!supportsDashboardSessionCoordination()) throw new DashboardSessionCoordinationError();
+      const session = await loginDashboardSession(input);
+      setMemoryDashboardSession(session);
+      const loaded = await loadOverviewWithOneRefresh(session.accessToken);
+      setOperator(loaded.session.user);
+      const { nextOverview } = loaded;
+      setOverview(nextOverview);
+      setApiStatus("live");
+    } catch (error) {
+      setOverview(emptyOverview);
+      setOperator(null);
+      setApiStatus(error instanceof DashboardSessionCoordinationError ? "unsupported" : "auth");
+      setLoginError(loginErrorMessage(error));
+    } finally {
+      setSubmittingLogin(false);
+    }
+  }
+
+  async function handleLogout() {
+    setSigningOut(true);
+    try {
+      await logoutDashboardBrowserSession();
+    } catch {
+      // Local session state still clears so a failed network logout does not strand the UI.
+    } finally {
+      clearMemoryDashboardSession();
+      setOperator(null);
+      setOverview(emptyOverview);
+      setApiStatus("auth");
+      setSigningOut(false);
+    }
+  }
 
   const activeListingCount = overview.listings.filter((listing) => listing.status === "active").length;
   const customerCount = new Set(overview.bookings.map((booking) => booking.name)).size;
@@ -121,12 +207,18 @@ export function DashboardShell() {
           ))}
 
           <div className="dashboard-user">
-            <div className="dashboard-user__avatar">AO</div>
+            <div className="dashboard-user__avatar">{operatorInitials(operator)}</div>
             <div className="dashboard-user__copy">
-              <div>Admin Operator</div>
+              <div>{operator?.email ?? "Operator"}</div>
               <span>{businessName}</span>
             </div>
           </div>
+
+          {apiStatus === "live" && (
+            <Button className="dashboard-signout" disabled={signingOut} onClick={handleLogout} type="button" variant="secondary">
+              {signingOut ? "Signing out" : "Sign out"}
+            </Button>
+          )}
 
           <button
             className="dashboard-collapse"
@@ -145,26 +237,28 @@ export function DashboardShell() {
             <h1>{pageTitle}</h1>
             <p>{pageSubtitle}</p>
           </div>
-          <div className="page-header__actions">
-            {activeNav !== "dashboard" && (
-              <Button variant="secondary" type="button" onClick={() => setActiveNav("dashboard")}>
-                ← Dashboard
+          {apiStatus === "live" && (
+            <div className="page-header__actions">
+              {activeNav !== "dashboard" && (
+                <Button variant="secondary" type="button" onClick={() => setActiveNav("dashboard")}>
+                  ← Dashboard
+                </Button>
+              )}
+              <Button variant="secondary" type="button">
+                Export
               </Button>
-            )}
-            <Button variant="secondary" type="button">
-              Export
-            </Button>
-            <Button type="button" onClick={() => setActiveNav("create")}>
-              + New Listing
-            </Button>
-          </div>
+              <Button type="button" onClick={() => setActiveNav("create")}>
+                + New Listing
+              </Button>
+            </div>
+          )}
         </header>
 
         <div className="api-status" data-status={apiStatus}>
-          {apiStatus === "live" ? "Live API" : apiStatus === "loading" ? "Connecting API" : apiStatus === "auth" ? "Sign in required" : "API unavailable"}
+          {apiStatus === "live" ? "Live API" : apiStatus === "loading" ? "Connecting API" : apiStatus === "auth" ? "Sign in required" : apiStatus === "unsupported" ? "Browser unsupported" : "API unavailable"}
         </div>
 
-        {apiStatus !== "live" && <DashboardUnavailable status={apiStatus} />}
+        {apiStatus !== "live" && <DashboardUnavailable error={loginError} onLogin={handleLogin} status={apiStatus} submitting={submittingLogin} />}
         {apiStatus === "live" && activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={() => setActiveNav("booking")} />}
         {apiStatus === "live" && activeNav === "listings" && <ListingsManager listings={overview.listings} onCreate={() => setActiveNav("create")} />}
         {apiStatus === "live" && activeNav === "create" && <CreateListing listingTab={listingTab} listings={overview.listings} setListingTab={setListingTab} />}
@@ -192,6 +286,19 @@ export function DashboardShell() {
   );
 }
 
+async function loadOverviewWithOneRefresh(accessToken: string): Promise<{ session: NonNullable<ReturnType<typeof currentDashboardSession>>; nextOverview: DashboardOverview }> {
+  try {
+    const nextOverview = await fetchDashboardOverview(accessToken);
+    const session = currentDashboardSession();
+    if (!session) throw new DashboardAuthRequiredError();
+    return { session, nextOverview };
+  } catch (error) {
+    if (!(error instanceof DashboardAuthRequiredError)) throw error;
+    const session = await refreshDashboardSessionAfterStaleToken(accessToken);
+    return { session, nextOverview: await fetchDashboardOverview(session.accessToken) };
+  }
+}
+
 function DashboardOverview({ onBooking, overview }: { onBooking: () => void; overview: DashboardOverview }) {
   return (
     <>
@@ -209,14 +316,83 @@ function DashboardOverview({ onBooking, overview }: { onBooking: () => void; ove
   );
 }
 
-function DashboardUnavailable({ status }: { status: "loading" | "auth" | "error" }) {
+function DashboardUnavailable({
+  error,
+  onLogin,
+  status,
+  submitting
+}: {
+  error: string | null;
+  onLogin: (input: DashboardLoginInput) => Promise<void>;
+  status: ApiStatus;
+  submitting: boolean;
+}) {
   if (status === "loading") {
     return <EmptyState className="dashboard-empty" icon="⊡" title="Connecting dashboard" body="Loading live operator data." />;
   }
+  if (status === "unsupported") {
+    return <EmptyState className="dashboard-empty" icon="◎" title="Browser unsupported" body="This dashboard requires secure browser session coordination." />;
+  }
   if (status === "auth") {
-    return <EmptyState className="dashboard-empty" icon="◎" title="Sign in required" body="Add an operator access token to continue." />;
+    return <DashboardLoginForm error={error} onSubmit={onLogin} submitting={submitting} />;
   }
   return <EmptyState className="dashboard-empty" icon="◌" title="API unavailable" body="The dashboard could not load live operator data." />;
+}
+
+function DashboardLoginForm({ error, onSubmit, submitting }: { error: string | null; onSubmit: (input: DashboardLoginInput) => Promise<void>; submitting: boolean }) {
+  const [businessSlug, setBusinessSlug] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const disabled = submitting || !businessSlug.trim() || !email.trim() || !password;
+
+  return (
+    <section className="dashboard-login" aria-labelledby="dashboard-login-heading">
+      <div className="dashboard-login__header">
+        <BrandLockup size="md" />
+        <div>
+          <h2 id="dashboard-login-heading">Operator sign in</h2>
+          <p>Access your live booking dashboard.</p>
+        </div>
+      </div>
+      <form
+        className="dashboard-login__form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (disabled) return;
+          void onSubmit({ businessSlug: businessSlug.trim(), email: email.trim(), password });
+        }}
+      >
+        <label>
+          <span>Business slug</span>
+          <Input autoComplete="organization" disabled={submitting} onChange={(event) => setBusinessSlug(event.target.value)} placeholder="sample-tours" value={businessSlug} />
+        </label>
+        <label>
+          <span>Email</span>
+          <Input autoComplete="email" disabled={submitting} onChange={(event) => setEmail(event.target.value)} placeholder="owner@example.com" type="email" value={email} />
+        </label>
+        <label>
+          <span>Password</span>
+          <Input autoComplete="current-password" disabled={submitting} onChange={(event) => setPassword(event.target.value)} type="password" value={password} />
+        </label>
+        {error && <p className="dashboard-login__error">{error}</p>}
+        <Button disabled={disabled} type="submit">
+          {submitting ? "Signing in" : "Sign in"}
+        </Button>
+      </form>
+    </section>
+  );
+}
+
+function loginErrorMessage(error: unknown) {
+  if (error instanceof DashboardRateLimitedError) return error.message;
+  if (error instanceof DashboardSessionCoordinationError) return "This browser cannot coordinate secure dashboard sessions.";
+  if (error instanceof DashboardLoginRejectedError) return "Invalid credentials.";
+  return "Unable to sign in.";
+}
+
+function operatorInitials(operator: DashboardUser | null) {
+  if (!operator?.email) return "OP";
+  return operator.email.slice(0, 2).toUpperCase();
 }
 
 function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["bookings"]; onBooking: () => void }) {
