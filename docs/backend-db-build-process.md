@@ -300,6 +300,7 @@ POST /public/bookings/checkout
    - create booking add-ons
    - create Stripe Checkout session later
    - return checkout URL or mock payment URL locally
+   - return an unguessable receipt token and confirmation URL for the customer
 
 3. Never mark booking as `confirmed` from the checkout request.
 
@@ -355,7 +356,7 @@ GET  /public/listings/:id
 GET  /public/listings/:id/availability?date=YYYY-MM-DD
 POST /public/bookings/quote
 POST /public/bookings/checkout
-GET  /public/bookings/:id/confirmation
+GET  /public/bookings/confirmation?token=<receipt-token>
 ```
 
 2. Public APIs must never expose:
@@ -364,6 +365,7 @@ GET  /public/bookings/:id/confirmation
    - business owner info
    - payment event data
    - audit logs
+   - raw booking IDs as public receipt credentials
 
 3. Add CORS rules:
    - dashboard API: strict origin
@@ -533,4 +535,3 @@ Run a new migration path in staging. Do not point production at a migrated SQLit
 5. Public embed APIs expose only public-safe data.
 6. Refresh tokens are rotated and stored hashed.
 7. Audit logs exist for operator and payment-sensitive actions.
-

@@ -227,6 +227,7 @@ model Booking {
   status                BookingStatus @default(pending_payment)
   paymentStatus         PaymentStatus @default(unpaid) @map("payment_status")
   paymentReferenceId    String?       @map("payment_reference_id")
+  confirmationToken     String?       @unique @map("confirmation_token")
   subtotalCents         Int           @map("subtotal_cents")
   taxCents              Int           @map("tax_cents")
   platformFeeCents      Int           @map("platform_fee_cents")

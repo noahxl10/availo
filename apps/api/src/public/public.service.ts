@@ -1,6 +1,6 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, InternalServerErrorException, NotFoundException } from "@nestjs/common";
 import { z } from "zod";
-import { prefixedId } from "../common/ids.js";
+import { prefixedId, secureToken } from "../common/ids.js";
 import { platformFeeCents } from "../common/money.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
@@ -191,6 +191,7 @@ export class PublicService {
           status: "pending_payment",
           paymentStatus: "pending",
           paymentReferenceId: `mock_${input.holdId}`,
+          confirmationToken: secureToken(),
           subtotalCents: quote.subtotalCents,
           taxCents: quote.taxCents,
           platformFeeCents: quote.platformFeeCents,
@@ -223,11 +224,20 @@ export class PublicService {
       return created;
     });
     const apiBaseUrl = process.env.API_BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
-    return { bookingId: booking.id, status: booking.status, checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}` };
+    if (!booking.confirmationToken) throw new InternalServerErrorException("Booking confirmation token was not created");
+    const confirmationPath = `/public/bookings/confirmation?token=${encodeURIComponent(booking.confirmationToken)}`;
+    return {
+      bookingId: booking.id,
+      status: booking.status,
+      checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}`,
+      confirmationToken: booking.confirmationToken,
+      confirmationUrl: `${apiBaseUrl}${confirmationPath}`
+    };
   }
 
-  async confirmation(id: string) {
-    const booking = await this.prisma.booking.findFirst({ where: { id, status: "confirmed" }, include: { listing: true } });
+  async confirmation(token: string) {
+    const input = parse(z.string().min(16), token);
+    const booking = await this.prisma.booking.findFirst({ where: { confirmationToken: input, status: "confirmed" }, include: { listing: true } });
     if (!booking) throw new NotFoundException("Confirmed booking not found");
     return { id: booking.id, status: booking.status, listing: booking.listing.title, totalCents: booking.totalCents };
   }

@@ -30,8 +30,8 @@ export class PublicController {
     return this.publicApi.checkout(body);
   }
 
-  @Get("bookings/:id/confirmation")
-  confirmation(@Param("id") id: string) {
-    return this.publicApi.confirmation(id);
+  @Get("bookings/confirmation")
+  confirmation(@Query("token") token: string) {
+    return this.publicApi.confirmation(token);
   }
 }

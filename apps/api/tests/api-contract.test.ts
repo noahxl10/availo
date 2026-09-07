@@ -121,6 +121,11 @@ describe("dashboard and public API contracts", () => {
     });
 
     expect(checkout.status).toBe("pending_payment");
+    expect(checkout.confirmationToken).toEqual(expect.any(String));
+    expect(checkout.confirmationToken).not.toBe(checkout.bookingId);
+    expect(checkout.confirmationUrl).toContain(`/public/bookings/confirmation?token=${encodeURIComponent(checkout.confirmationToken ?? "")}`);
+    await expect(publicApi.confirmation(checkout.confirmationToken ?? "")).rejects.toThrow("Confirmed booking not found");
+    await expect(publicApi.confirmation(checkout.bookingId)).rejects.toThrow();
     await expect(
       publicApi.checkout({
         holdId: quote.holdId,
@@ -139,6 +144,14 @@ describe("dashboard and public API contracts", () => {
 
     const confirmation = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
     expect(confirmation).toEqual({ ok: true, duplicate: false, bookingId: checkout.bookingId });
+    await expect(publicApi.confirmation("short-token")).rejects.toThrow();
+    const receipt = await publicApi.confirmation(checkout.confirmationToken ?? "");
+    expect(receipt).toEqual({
+      id: checkout.bookingId,
+      status: "confirmed",
+      listing: "Harbor Kayak Tour",
+      totalCents: quote.quote.totalCents
+    });
     const duplicate = await payments.mockConfirm({ bookingId: checkout.bookingId, providerEventId: "evt_test_confirm" });
     expect(duplicate).toEqual({ ok: true, duplicate: true, bookingId: checkout.bookingId });
     const confirmed = await prisma.booking.findUniqueOrThrow({ where: { id: checkout.bookingId } });
