@@ -21,6 +21,6 @@
     "db:seed": "npm run prisma:seed --workspace @availo/api"
   },
   "devDependencies": {
-    "typescript": "^5.7.2"
+    "typescript": "^7.0.2"
   }
 }
