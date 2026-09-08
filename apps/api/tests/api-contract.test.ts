@@ -150,6 +150,151 @@ describe("dashboard and public API contracts", () => {
     await prisma.auditLog.deleteMany({ where: { entityId: checkout.bookingId } });
   });
 
+  it("uses availability-rule capacity when quoting and revalidating checkout capacity", async () => {
+    const ruleId = "av_harbor_kayak_2_0";
+    const date = "2026-05-12";
+    let holdId: string | null = null;
+    try {
+      await prisma.availabilityRule.update({ where: { id: ruleId }, data: { capacity: 12 } });
+      const quote = await publicApi.quote({
+        listingId: "lst_harbor_kayak_tour",
+        date,
+        startTime: "9:30 AM",
+        adults: 3,
+        children: 0,
+        addOns: []
+      });
+      holdId = quote.holdId;
+
+      await prisma.availabilityRule.update({ where: { id: ruleId }, data: { capacity: 2 } });
+      const availability = await publicApi.availability("lst_harbor_kayak_tour", date);
+      expect(availability.slots.find((slot) => slot.startTime === "9:30 AM")?.capacityRemaining).toBe(0);
+
+      await expect(
+        publicApi.checkout({
+          holdId: quote.holdId,
+          listingId: "lst_harbor_kayak_tour",
+          date,
+          startTime: "9:30 AM",
+          adults: 3,
+          children: 0,
+          addOns: [],
+          customer: { name: "Capacity Tester", email: "capacity@example.com" }
+        })
+      ).rejects.toThrow("Selected slot is unavailable");
+
+      await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
+      holdId = null;
+
+      await expect(
+        publicApi.quote({
+          listingId: "lst_harbor_kayak_tour",
+          date,
+          startTime: "9:30 AM",
+          adults: 3,
+          children: 0,
+          addOns: []
+        })
+      ).rejects.toThrow("Selected slot is unavailable");
+    } finally {
+      if (holdId) await prisma.bookingHold.deleteMany({ where: { id: holdId } });
+      await prisma.availabilityRule.update({ where: { id: ruleId }, data: { capacity: 12 } });
+    }
+  });
+
+  it("uses the smaller capacity when active rules overlap on the same slot", async () => {
+    const overlapRuleId = "av_overlap_low_capacity";
+    try {
+      await prisma.availabilityRule.create({
+        data: {
+          id: overlapRuleId,
+          businessId: DEMO_BUSINESS_ID,
+          listingId: "lst_harbor_kayak_tour",
+          dayOfWeek: 2,
+          startTime: "9:30 AM",
+          endTime: "10:30 AM",
+          slotIntervalMinutes: 60,
+          capacity: 1,
+          effectiveStartDate: "2026-05-01"
+        }
+      });
+
+      const availability = await publicApi.availability("lst_harbor_kayak_tour", "2026-05-12");
+      expect(availability.slots.find((slot) => slot.startTime === "9:30 AM")?.capacityRemaining).toBe(1);
+
+      await expect(
+        publicApi.quote({
+          listingId: "lst_harbor_kayak_tour",
+          date: "2026-05-12",
+          startTime: "9:30 AM",
+          adults: 2,
+          children: 0,
+          addOns: []
+        })
+      ).rejects.toThrow("Selected slot is unavailable");
+    } finally {
+      await prisma.availabilityRule.deleteMany({ where: { id: overlapRuleId } });
+    }
+  });
+
+  it("hides slots outside effective availability windows", async () => {
+    const ruleId = "av_harbor_kayak_2_0";
+    let holdId: string | null = null;
+    try {
+      const quote = await publicApi.quote({
+        listingId: "lst_harbor_kayak_tour",
+        date: "2026-05-12",
+        startTime: "9:30 AM",
+        adults: 1,
+        children: 0,
+        addOns: []
+      });
+      holdId = quote.holdId;
+      await prisma.availabilityRule.update({ where: { id: ruleId }, data: { effectiveEndDate: "2026-05-11" } });
+
+      const availability = await publicApi.availability("lst_harbor_kayak_tour", "2026-05-12");
+      expect(availability.slots.map((slot) => slot.startTime)).not.toContain("9:30 AM");
+
+      await expect(
+        publicApi.quote({
+          listingId: "lst_harbor_kayak_tour",
+          date: "2026-05-12",
+          startTime: "9:30 AM",
+          adults: 1,
+          children: 0,
+          addOns: []
+        })
+      ).rejects.toThrow("Selected slot is unavailable");
+
+      await expect(
+        publicApi.checkout({
+          holdId: quote.holdId,
+          listingId: "lst_harbor_kayak_tour",
+          date: "2026-05-12",
+          startTime: "9:30 AM",
+          adults: 1,
+          children: 0,
+          addOns: [],
+          customer: { name: "Window Tester", email: "window@example.com" }
+        })
+      ).rejects.toThrow("Selected slot is unavailable");
+    } finally {
+      if (holdId) await prisma.bookingHold.deleteMany({ where: { id: holdId } });
+      await prisma.availabilityRule.update({ where: { id: ruleId }, data: { effectiveEndDate: null } });
+    }
+  });
+
+  it("applies dated availability exceptions to the configured slot window only", async () => {
+    const availability = await publicApi.availability("lst_harbor_kayak_tour", "2026-05-09");
+
+    expect(availability.slots).toEqual([
+      expect.objectContaining({
+        startTime: "3:30 PM",
+        capacityRemaining: 0
+      })
+    ]);
+  });
+
   it("rejects listing updates that would invert guest limits", async () => {
     await expect(listingService.update("lst_harbor_kayak_tour", { minGuests: 99 })).rejects.toThrow("minGuests cannot be greater than maxGuests");
   });

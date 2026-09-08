@@ -6,12 +6,14 @@ import { PrismaService } from "../prisma/prisma.service.js";
 
 const quoteInput = z.object({
   listingId: z.string().min(1),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isRealDate, "Invalid booking date"),
   startTime: z.string().min(1),
   adults: z.number().int().min(1),
   children: z.number().int().min(0).default(0),
   addOns: z.array(z.object({ id: z.string(), quantity: z.number().int().positive() })).default([])
 });
+
+const availabilityDateInput = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isRealDate, "Invalid availability date");
 
 const checkoutInput = quoteInput.extend({
   holdId: z.string().min(1),
@@ -58,31 +60,45 @@ export class PublicService {
   }
 
   async availability(id: string, date: string) {
+    const requestedDate = parse(availabilityDateInput, date);
+    const day = new Date(`${requestedDate}T12:00:00`).getDay();
     const listing = await this.prisma.listing.findFirst({
       where: { id, status: "active" },
-      include: { rules: true, exceptions: true, bookings: { where: { bookingDate: date, status: { in: ["confirmed", "pending_payment"] } } } }
+      include: { bookings: { where: { bookingDate: requestedDate, status: { in: ["confirmed", "pending_payment"] } } } }
     });
     if (!listing) throw new NotFoundException("Listing not found");
 
-    const exception = listing.exceptions.find((item) => item.date === date);
-    if (exception?.isClosed) return { date, slots: [] };
+    const [exception, rules, activeHolds] = await Promise.all([
+      this.prisma.availabilityException.findUnique({ where: { listingId_date: { listingId: id, date: requestedDate } } }),
+      this.prisma.availabilityRule.findMany({
+        where: {
+          listingId: id,
+          dayOfWeek: day,
+          effectiveStartDate: { lte: requestedDate },
+          OR: [{ effectiveEndDate: null }, { effectiveEndDate: { gte: requestedDate } }]
+        }
+      }),
+      this.prisma.bookingHold.findMany({
+        where: { listingId: id, bookingDate: requestedDate, expiresAt: { gt: new Date() } }
+      })
+    ]);
+    if (exception?.isClosed) return { date: requestedDate, slots: [] };
 
-    const day = new Date(`${date}T12:00:00`).getDay();
-    const rules = listing.rules.filter((rule) => rule.dayOfWeek === day);
-    const activeHolds = await this.prisma.bookingHold.findMany({
-      where: { listingId: id, bookingDate: date, expiresAt: { gt: new Date() } }
-    });
-    const slots = rules.flatMap((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes)).map((time) => {
+    const slots = rules.flatMap((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes).map((time) => ({ time, ruleCapacity: rule.capacity })));
+    const visibleSlots = slots.filter(({ time }) => isExceptionSlotVisible(time, exception));
+    const uniqueSlots = mergeSlotsByTime(visibleSlots);
+    const available = uniqueSlots.map(({ time, ruleCapacity }) => {
       const booked = listing.bookings.filter((booking) => booking.startTime === time).reduce((sum, booking) => sum + booking.guestCount, 0);
       const held = activeHolds.filter((hold) => hold.startTime === time).reduce((sum, hold) => sum + hold.guestCount, 0);
-      const capacity = exception?.customCapacity ?? listing.capacity;
-      return { id: `${id}_${date}_${time}`, listingId: id, date, startTime: time, capacityRemaining: Math.max(capacity - booked - held, 0) };
+      const capacity = exception?.customCapacity ?? ruleCapacity;
+      return { id: `${id}_${requestedDate}_${time}`, listingId: id, date: requestedDate, startTime: time, capacityRemaining: Math.max(capacity - booked - held, 0) };
     });
-    return { date, slots };
+    return { date: requestedDate, slots: available };
   }
 
   async quote(body: unknown) {
     const input = parse(quoteInput, body);
+    const now = new Date();
     const listing = await this.prisma.listing.findFirst({
       where: { id: input.listingId, status: "active" },
       include: { business: true, addOns: { where: { status: "active" } } }
@@ -90,10 +106,6 @@ export class PublicService {
     if (!listing) throw new NotFoundException("Listing not found");
     const guestCount = input.adults + input.children;
     if (guestCount < listing.minGuests || guestCount > listing.maxGuests) throw new BadRequestException("Guest count outside listing limits");
-
-    const availability = await this.availability(input.listingId, input.date);
-    const slot = availability.slots.find((item) => item.startTime === input.startTime);
-    if (!slot || slot.capacityRemaining < guestCount) throw new BadRequestException("Selected slot is unavailable");
 
     const { subtotalCents, addOns } = subtotal(listing, input);
     const taxCents = Math.round(subtotalCents * (listing.business.taxRateBps / 10000));
@@ -113,17 +125,45 @@ export class PublicService {
       addOns
     };
 
-    const hold = await this.prisma.bookingHold.create({
-      data: {
-        id: prefixedId("hold"),
-        businessId: listing.businessId,
-        listingId: listing.id,
-        bookingDate: input.date,
-        startTime: input.startTime,
-        guestCount,
-        quoteJson: JSON.stringify(quote),
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+    const hold = await this.prisma.$transaction(async (tx) => {
+      const quoteDay = new Date(`${input.date}T12:00:00`).getDay();
+      const [heldGuestCount, bookedGuestCount, exception, rules] = await Promise.all([
+        tx.bookingHold.aggregate({
+          where: { listingId: listing.id, bookingDate: input.date, startTime: input.startTime, expiresAt: { gt: now } },
+          _sum: { guestCount: true }
+        }),
+        tx.booking.aggregate({
+          where: { listingId: listing.id, bookingDate: input.date, startTime: input.startTime, status: { in: ["confirmed", "pending_payment"] } },
+          _sum: { guestCount: true }
+        }),
+        tx.availabilityException.findUnique({ where: { listingId_date: { listingId: listing.id, date: input.date } } }),
+        tx.availabilityRule.findMany({
+          where: {
+            listingId: listing.id,
+            dayOfWeek: quoteDay,
+            effectiveStartDate: { lte: input.date },
+            OR: [{ effectiveEndDate: null }, { effectiveEndDate: { gte: input.date } }]
+          }
+        })
+      ]);
+      const ruleCapacity = capacityForStartTime(rules, input.date, input.startTime, exception);
+      if (ruleCapacity === null) throw new BadRequestException("Selected slot is unavailable");
+      const capacity = exception?.customCapacity ?? ruleCapacity;
+      if (capacity - (heldGuestCount._sum.guestCount ?? 0) - (bookedGuestCount._sum.guestCount ?? 0) < guestCount) {
+        throw new BadRequestException("Selected slot is unavailable");
       }
+      return tx.bookingHold.create({
+        data: {
+          id: prefixedId("hold"),
+          businessId: listing.businessId,
+          listingId: listing.id,
+          bookingDate: input.date,
+          startTime: input.startTime,
+          guestCount,
+          quoteJson: JSON.stringify(quote),
+          expiresAt: new Date(now.getTime() + 15 * 60 * 1000)
+        }
+      });
     });
     return { holdId: hold.id, expiresAt: hold.expiresAt.toISOString(), quote };
   }
@@ -159,7 +199,8 @@ export class PublicService {
     }
     const listing = await this.prisma.listing.findFirstOrThrow({ where: { id: hold.listingId, status: "active" } });
     const booking = await this.prisma.$transaction(async (tx) => {
-      const [heldGuestCount, bookedGuestCount, exception] = await Promise.all([
+      const checkoutDay = new Date(`${hold.bookingDate}T12:00:00`).getDay();
+      const [heldGuestCount, bookedGuestCount, exception, rules] = await Promise.all([
         tx.bookingHold.aggregate({
           where: { listingId: hold.listingId, bookingDate: hold.bookingDate, startTime: hold.startTime, id: { not: hold.id }, expiresAt: { gt: now } },
           _sum: { guestCount: true }
@@ -168,9 +209,19 @@ export class PublicService {
           where: { listingId: hold.listingId, bookingDate: hold.bookingDate, startTime: hold.startTime, status: { in: ["confirmed", "pending_payment"] } },
           _sum: { guestCount: true }
         }),
-        tx.availabilityException.findUnique({ where: { listingId_date: { listingId: hold.listingId, date: hold.bookingDate } } })
+        tx.availabilityException.findUnique({ where: { listingId_date: { listingId: hold.listingId, date: hold.bookingDate } } }),
+        tx.availabilityRule.findMany({
+          where: {
+            listingId: hold.listingId,
+            dayOfWeek: checkoutDay,
+            effectiveStartDate: { lte: hold.bookingDate },
+            OR: [{ effectiveEndDate: null }, { effectiveEndDate: { gte: hold.bookingDate } }]
+          }
+        })
       ]);
-      const capacity = exception?.customCapacity ?? listing.capacity;
+      const ruleCapacity = capacityForStartTime(rules, hold.bookingDate, hold.startTime, exception);
+      if (ruleCapacity === null) throw new BadRequestException("Selected slot is unavailable");
+      const capacity = exception?.customCapacity ?? ruleCapacity;
       if (capacity - (heldGuestCount._sum.guestCount ?? 0) - (bookedGuestCount._sum.guestCount ?? 0) < hold.guestCount) {
         throw new BadRequestException("Selected slot is unavailable");
       }
@@ -299,6 +350,47 @@ function fromMinutes(value: number) {
   const hour = Math.floor(value / 60);
   const minute = value % 60;
   return `${hour % 12 === 0 ? 12 : hour % 12}:${String(minute).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+function isRealDate(date: string) {
+  const parsed = new Date(`${date}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
+}
+
+function isRuleActive(rule: { dayOfWeek: number; effectiveStartDate: string; effectiveEndDate: string | null }, date: string) {
+  const day = new Date(`${date}T12:00:00`).getDay();
+  return rule.dayOfWeek === day && rule.effectiveStartDate <= date && (!rule.effectiveEndDate || rule.effectiveEndDate >= date);
+}
+
+function isExceptionSlotVisible(time: string, exception?: { customStartTime: string | null; customEndTime: string | null } | null) {
+  if (!exception?.customStartTime && !exception?.customEndTime) return true;
+  const value = minutes(time);
+  if (exception.customStartTime && value < minutes(exception.customStartTime)) return false;
+  if (exception.customEndTime && value >= minutes(exception.customEndTime)) return false;
+  return true;
+}
+
+function mergeSlotsByTime(slots: { time: string; ruleCapacity: number }[]) {
+  const byTime = new Map<string, { time: string; ruleCapacity: number }>();
+  for (const slot of slots) {
+    const existing = byTime.get(slot.time);
+    if (!existing || slot.ruleCapacity < existing.ruleCapacity) byTime.set(slot.time, slot);
+  }
+  return [...byTime.values()].sort((a, b) => minutes(a.time) - minutes(b.time));
+}
+
+function capacityForStartTime(
+  rules: { dayOfWeek: number; startTime: string; endTime: string; slotIntervalMinutes: number; capacity: number; effectiveStartDate: string; effectiveEndDate: string | null }[],
+  date: string,
+  startTime: string,
+  exception?: { isClosed: boolean; customStartTime: string | null; customEndTime: string | null } | null
+) {
+  if (exception?.isClosed || !isExceptionSlotVisible(startTime, exception)) return null;
+  const matches = rules
+    .filter((rule) => isRuleActive(rule, date))
+    .filter((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes).includes(startTime));
+  if (!matches.length) return null;
+  return Math.min(...matches.map((rule) => rule.capacity));
 }
 
 function addMinutes(time: string, increment: number) {
