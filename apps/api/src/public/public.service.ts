@@ -4,23 +4,41 @@ import { prefixedId } from "../common/ids.js";
 import { platformFeeCents } from "../common/money.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
-const quoteInput = z.object({
+const quoteFields = {
   listingId: z.string().min(1),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   startTime: z.string().min(1),
   adults: z.number().int().min(1),
   children: z.number().int().min(0).default(0),
   addOns: z.array(z.object({ id: z.string(), quantity: z.number().int().positive() })).default([])
-});
+};
 
-const checkoutInput = quoteInput.extend({
+const quoteInput = z.object(quoteFields).superRefine(rejectDuplicateAddOns);
+
+const checkoutInput = z.object({
+  ...quoteFields,
   holdId: z.string().min(1),
   customer: z.object({
     name: z.string().min(1),
     email: z.string().email(),
     phone: z.string().optional()
   })
-});
+}).superRefine(rejectDuplicateAddOns);
+
+function rejectDuplicateAddOns(input: { addOns: { id: string }[] }, ctx: z.RefinementCtx) {
+  const seen = new Set<string>();
+  input.addOns.forEach((addOn, index) => {
+    if (seen.has(addOn.id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate add-on ${addOn.id}`,
+        path: ["addOns", index, "id"]
+      });
+      return;
+    }
+    seen.add(addOn.id);
+  });
+}
 
 @Injectable()
 export class PublicService {

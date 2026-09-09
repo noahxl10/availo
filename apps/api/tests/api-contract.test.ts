@@ -150,6 +150,73 @@ describe("dashboard and public API contracts", () => {
     await prisma.auditLog.deleteMany({ where: { entityId: checkout.bookingId } });
   });
 
+  it("rejects duplicate add-ons before creating a booking hold", async () => {
+    const holdsBeforeDuplicateQuote = await prisma.bookingHold.count();
+
+    await expect(
+      publicApi.quote({
+        listingId: "lst_harbor_kayak_tour",
+        date: "2026-05-12",
+        startTime: "9:30 AM",
+        adults: 1,
+        children: 0,
+        addOns: [
+          { id: "add_child_ticket", quantity: 12 },
+          { id: "add_child_ticket", quantity: 12 }
+        ]
+      })
+    ).rejects.toMatchObject({
+      response: {
+        fieldErrors: {
+          addOns: ["Duplicate add-on add_child_ticket"]
+        }
+      }
+    });
+
+    await expect(prisma.bookingHold.count()).resolves.toBe(holdsBeforeDuplicateQuote);
+  });
+
+  it("rejects duplicate checkout add-ons before creating booking records", async () => {
+    const quote = await publicApi.quote({
+      listingId: "lst_harbor_kayak_tour",
+      date: "2026-05-12",
+      startTime: "9:30 AM",
+      adults: 1,
+      children: 0,
+      addOns: [{ id: "add_child_ticket", quantity: 1 }]
+    });
+    const bookingsBefore = await prisma.booking.count();
+    const bookingAddOnsBefore = await prisma.bookingAddOn.count();
+    const auditsBefore = await prisma.auditLog.count();
+
+    await expect(
+      publicApi.checkout({
+        holdId: quote.holdId,
+        listingId: "lst_harbor_kayak_tour",
+        date: "2026-05-12",
+        startTime: "9:30 AM",
+        adults: 1,
+        children: 0,
+        addOns: [
+          { id: "add_child_ticket", quantity: 12 },
+          { id: "add_child_ticket", quantity: 12 }
+        ],
+        customer: { name: "API Tester", email: "tester@example.com" }
+      })
+    ).rejects.toMatchObject({
+      response: {
+        fieldErrors: {
+          addOns: ["Duplicate add-on add_child_ticket"]
+        }
+      }
+    });
+
+    await expect(prisma.booking.count()).resolves.toBe(bookingsBefore);
+    await expect(prisma.bookingAddOn.count()).resolves.toBe(bookingAddOnsBefore);
+    await expect(prisma.auditLog.count()).resolves.toBe(auditsBefore);
+    await prisma.bookingHold.delete({ where: { id: quote.holdId } });
+  });
+
   it("rejects listing updates that would invert guest limits", async () => {
     await expect(listingService.update("lst_harbor_kayak_tour", { minGuests: 99 })).rejects.toThrow("minGuests cannot be greater than maxGuests");
   });
