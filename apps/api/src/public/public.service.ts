@@ -84,13 +84,14 @@ export class PublicService {
     ]);
     if (exception?.isClosed) return { date: requestedDate, slots: [] };
 
-    const slots = rules.flatMap((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes).map((time) => ({ time, ruleCapacity: rule.capacity })));
+    const activeRules = rules.filter((rule) => isRuleActive(rule, requestedDate));
+    const slots = activeRules.flatMap((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes, rule.capacity).map((time) => ({ time, ruleCapacity: rule.capacity })));
     const visibleSlots = slots.filter(({ time }) => isExceptionSlotVisible(time, exception));
     const uniqueSlots = mergeSlotsByTime(visibleSlots);
     const available = uniqueSlots.map(({ time, ruleCapacity }) => {
       const booked = listing.bookings.filter((booking) => booking.startTime === time).reduce((sum, booking) => sum + booking.guestCount, 0);
       const held = activeHolds.filter((hold) => hold.startTime === time).reduce((sum, hold) => sum + hold.guestCount, 0);
-      const capacity = exception?.customCapacity ?? ruleCapacity;
+      const capacity = exceptionCapacity(exception?.customCapacity) ?? ruleCapacity;
       return { id: `${id}_${requestedDate}_${time}`, listingId: id, date: requestedDate, startTime: time, capacityRemaining: Math.max(capacity - booked - held, 0) };
     });
     return { date: requestedDate, slots: available };
@@ -148,7 +149,7 @@ export class PublicService {
       ]);
       const ruleCapacity = capacityForStartTime(rules, input.date, input.startTime, exception);
       if (ruleCapacity === null) throw new BadRequestException("Selected slot is unavailable");
-      const capacity = exception?.customCapacity ?? ruleCapacity;
+      const capacity = exceptionCapacity(exception?.customCapacity) ?? ruleCapacity;
       if (capacity - (heldGuestCount._sum.guestCount ?? 0) - (bookedGuestCount._sum.guestCount ?? 0) < guestCount) {
         throw new BadRequestException("Selected slot is unavailable");
       }
@@ -221,7 +222,7 @@ export class PublicService {
       ]);
       const ruleCapacity = capacityForStartTime(rules, hold.bookingDate, hold.startTime, exception);
       if (ruleCapacity === null) throw new BadRequestException("Selected slot is unavailable");
-      const capacity = exception?.customCapacity ?? ruleCapacity;
+      const capacity = exceptionCapacity(exception?.customCapacity) ?? ruleCapacity;
       if (capacity - (heldGuestCount._sum.guestCount ?? 0) - (bookedGuestCount._sum.guestCount ?? 0) < hold.guestCount) {
         throw new BadRequestException("Selected slot is unavailable");
       }
@@ -324,10 +325,13 @@ function publicBusiness(business: { id: string; name: string; slug: string; time
   };
 }
 
-function generateSlots(startTime: string, endTime: string, intervalMinutes: number) {
+function generateSlots(startTime: string, endTime: string, intervalMinutes: number, capacity = 1) {
+  const start = parseTime(startTime);
+  const end = parseTime(endTime);
+  if (start === null || end === null || start >= end || intervalMinutes <= 0 || capacity <= 0) return [];
+
   const slots: string[] = [];
-  let cursor = minutes(startTime);
-  const end = minutes(endTime);
+  let cursor = start;
   while (cursor < end) {
     slots.push(fromMinutes(cursor));
     cursor += intervalMinutes;
@@ -336,14 +340,54 @@ function generateSlots(startTime: string, endTime: string, intervalMinutes: numb
 }
 
 function minutes(time: string) {
+  return parseTime(time) ?? 0;
+}
+
+function parseTime(time: string) {
   const match = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i.exec(time.trim());
-  if (!match) return 0;
+  if (!match) return null;
   const period = match[3]?.toUpperCase();
   let hour = Number(match[1]);
   const minute = Number(match[2]);
+  if (minute > 59) return null;
+  if (period) {
+    if (hour < 1 || hour > 12) return null;
+  } else if (hour > 23) {
+    return null;
+  }
   if (period === "PM" && hour !== 12) hour += 12;
   if (period === "AM" && hour === 12) hour = 0;
   return hour * 60 + minute;
+}
+
+function isRealDate(date: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
+function availabilityExceptionWindow(exception?: { customStartTime: string | null; customEndTime: string | null } | null) {
+  if (!exception?.customStartTime && !exception?.customEndTime) return null;
+  if (!exception.customStartTime || !exception.customEndTime) return { start: 0, end: 0 };
+  const start = parseTime(exception.customStartTime);
+  const end = parseTime(exception.customEndTime);
+  if (start === null || end === null || start >= end) return { start: 0, end: 0 };
+  return { start, end };
+}
+
+function slotIsInsideWindow(time: string, window: { start: number; end: number } | null) {
+  if (!window) return true;
+  const value = parseTime(time);
+  return value !== null && value >= window.start && value < window.end;
+}
+
+function exceptionCapacity(capacity?: number | null) {
+  if (capacity === undefined || capacity === null) return null;
+  return capacity >= 0 ? capacity : 0;
 }
 
 function fromMinutes(value: number) {
@@ -352,22 +396,15 @@ function fromMinutes(value: number) {
   return `${hour % 12 === 0 ? 12 : hour % 12}:${String(minute).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
 }
 
-function isRealDate(date: string) {
-  const parsed = new Date(`${date}T00:00:00.000Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date;
-}
-
 function isRuleActive(rule: { dayOfWeek: number; effectiveStartDate: string; effectiveEndDate: string | null }, date: string) {
   const day = new Date(`${date}T12:00:00`).getDay();
+  if (!isRealDate(rule.effectiveStartDate) || (rule.effectiveEndDate !== null && !isRealDate(rule.effectiveEndDate))) return false;
+  if (rule.effectiveEndDate !== null && rule.effectiveStartDate > rule.effectiveEndDate) return false;
   return rule.dayOfWeek === day && rule.effectiveStartDate <= date && (!rule.effectiveEndDate || rule.effectiveEndDate >= date);
 }
 
 function isExceptionSlotVisible(time: string, exception?: { customStartTime: string | null; customEndTime: string | null } | null) {
-  if (!exception?.customStartTime && !exception?.customEndTime) return true;
-  const value = minutes(time);
-  if (exception.customStartTime && value < minutes(exception.customStartTime)) return false;
-  if (exception.customEndTime && value >= minutes(exception.customEndTime)) return false;
-  return true;
+  return slotIsInsideWindow(time, availabilityExceptionWindow(exception));
 }
 
 function mergeSlotsByTime(slots: { time: string; ruleCapacity: number }[]) {
@@ -383,12 +420,12 @@ function capacityForStartTime(
   rules: { dayOfWeek: number; startTime: string; endTime: string; slotIntervalMinutes: number; capacity: number; effectiveStartDate: string; effectiveEndDate: string | null }[],
   date: string,
   startTime: string,
-  exception?: { isClosed: boolean; customStartTime: string | null; customEndTime: string | null } | null
+  exception?: { isClosed: boolean; customStartTime: string | null; customEndTime: string | null; customCapacity?: number | null } | null
 ) {
   if (exception?.isClosed || !isExceptionSlotVisible(startTime, exception)) return null;
   const matches = rules
     .filter((rule) => isRuleActive(rule, date))
-    .filter((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes).includes(startTime));
+    .filter((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes, rule.capacity).includes(startTime));
   if (!matches.length) return null;
   return Math.min(...matches.map((rule) => rule.capacity));
 }

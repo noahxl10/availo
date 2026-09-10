@@ -298,4 +298,256 @@ describe("dashboard and public API contracts", () => {
   it("rejects listing updates that would invert guest limits", async () => {
     await expect(listingService.update("lst_harbor_kayak_tour", { minGuests: 99 })).rejects.toThrow("minGuests cannot be greater than maxGuests");
   });
+
+  it("ignores invalid persisted availability rules without creating phantom slots or holds", async () => {
+    const listingId = "lst_invalid_schedule_contract";
+    await prisma.bookingHold.deleteMany({ where: { listingId } });
+    await prisma.availabilityRule.deleteMany({ where: { listingId } });
+    await prisma.listing.deleteMany({ where: { id: listingId } });
+    await prisma.listing.create({
+      data: {
+        id: listingId,
+        businessId: DEMO_BUSINESS_ID,
+        title: "Invalid Schedule Contract",
+        category: "Tour",
+        status: "active",
+        basePriceCents: 2500,
+        durationMinutes: 30,
+        minGuests: 1,
+        maxGuests: 6,
+        capacity: 6,
+        imageUrlsJson: "[]"
+      }
+    });
+    await prisma.availabilityRule.createMany({
+      data: [
+        {
+          id: "av_invalid_schedule_bad_start",
+          businessId: DEMO_BUSINESS_ID,
+          listingId,
+          dayOfWeek: 2,
+          startTime: "not a time",
+          endTime: "10:00 AM",
+          slotIntervalMinutes: 30,
+          capacity: 6,
+          effectiveStartDate: "2026-05-01"
+        },
+        {
+          id: "av_invalid_schedule_inverted",
+          businessId: DEMO_BUSINESS_ID,
+          listingId,
+          dayOfWeek: 2,
+          startTime: "11:00 AM",
+          endTime: "10:00 AM",
+          slotIntervalMinutes: 30,
+          capacity: 6,
+          effectiveStartDate: "2026-05-01"
+        },
+        {
+          id: "av_invalid_schedule_zero_interval",
+          businessId: DEMO_BUSINESS_ID,
+          listingId,
+          dayOfWeek: 2,
+          startTime: "9:00 AM",
+          endTime: "10:00 AM",
+          slotIntervalMinutes: 0,
+          capacity: 6,
+          effectiveStartDate: "2026-05-01"
+        },
+        {
+          id: "av_invalid_schedule_negative_capacity",
+          businessId: DEMO_BUSINESS_ID,
+          listingId,
+          dayOfWeek: 2,
+          startTime: "1:00 PM",
+          endTime: "2:00 PM",
+          slotIntervalMinutes: 30,
+          capacity: -1,
+          effectiveStartDate: "2026-05-01"
+        },
+        {
+          id: "av_invalid_schedule_bad_effective_end",
+          businessId: DEMO_BUSINESS_ID,
+          listingId,
+          dayOfWeek: 2,
+          startTime: "3:00 PM",
+          endTime: "4:00 PM",
+          slotIntervalMinutes: 30,
+          capacity: 6,
+          effectiveStartDate: "2026-05-01",
+          effectiveEndDate: "bad-date"
+        }
+      ]
+    });
+
+    const availability = await publicApi.availability(listingId, "2026-05-12");
+    expect(availability.slots).toEqual([]);
+
+    await expect(
+      publicApi.quote({
+        listingId,
+        date: "2026-05-12",
+        startTime: "12:00 AM",
+        adults: 1,
+        children: 0,
+        addOns: []
+      })
+    ).rejects.toThrow("Selected slot is unavailable");
+    await expect(
+      publicApi.quote({
+        listingId,
+        date: "2026-02-31",
+        startTime: "9:00 AM",
+        adults: 1,
+        children: 0,
+        addOns: []
+      })
+    ).rejects.toThrow();
+    expect(await prisma.bookingHold.count({ where: { listingId } })).toBe(0);
+
+    await prisma.availabilityRule.deleteMany({ where: { listingId } });
+    await prisma.listing.deleteMany({ where: { id: listingId } });
+  });
+
+  it("fails closed for invalid exception windows and negative custom capacity", async () => {
+    const listingId = "lst_invalid_exception_contract";
+    await prisma.bookingHold.deleteMany({ where: { listingId } });
+    await prisma.availabilityException.deleteMany({ where: { listingId } });
+    await prisma.availabilityRule.deleteMany({ where: { listingId } });
+    await prisma.listing.deleteMany({ where: { id: listingId } });
+    await prisma.listing.create({
+      data: {
+        id: listingId,
+        businessId: DEMO_BUSINESS_ID,
+        title: "Invalid Exception Contract",
+        category: "Tour",
+        status: "active",
+        basePriceCents: 2500,
+        durationMinutes: 30,
+        minGuests: 1,
+        maxGuests: 6,
+        capacity: 6,
+        imageUrlsJson: "[]"
+      }
+    });
+    await prisma.availabilityRule.create({
+      data: {
+        id: "av_invalid_exception_valid_rule",
+        businessId: DEMO_BUSINESS_ID,
+        listingId,
+        dayOfWeek: 2,
+        startTime: "9:00 AM",
+        endTime: "10:00 AM",
+        slotIntervalMinutes: 30,
+        capacity: 6,
+        effectiveStartDate: "2026-05-01"
+      }
+    });
+    await prisma.availabilityException.create({
+      data: {
+        id: "exc_invalid_exception_window",
+        businessId: DEMO_BUSINESS_ID,
+        listingId,
+        date: "2026-05-12",
+        customStartTime: "bad",
+        customEndTime: "10:00 AM",
+        customCapacity: 3
+      }
+    });
+
+    expect((await publicApi.availability(listingId, "2026-05-12")).slots).toEqual([]);
+
+    await prisma.availabilityException.update({
+      where: { listingId_date: { listingId, date: "2026-05-12" } },
+      data: { customStartTime: "9:00 AM", customEndTime: "10:00 AM", customCapacity: -1 }
+    });
+
+    const availability = await publicApi.availability(listingId, "2026-05-12");
+    expect(availability.slots).toEqual([
+      { id: `${listingId}_2026-05-12_9:00 AM`, listingId, date: "2026-05-12", startTime: "9:00 AM", capacityRemaining: 0 },
+      { id: `${listingId}_2026-05-12_9:30 AM`, listingId, date: "2026-05-12", startTime: "9:30 AM", capacityRemaining: 0 }
+    ]);
+    await expect(
+      publicApi.quote({
+        listingId,
+        date: "2026-05-12",
+        startTime: "9:00 AM",
+        adults: 1,
+        children: 0,
+        addOns: []
+      })
+    ).rejects.toThrow("Selected slot is unavailable");
+    expect(await prisma.bookingHold.count({ where: { listingId } })).toBe(0);
+
+    await prisma.availabilityException.deleteMany({ where: { listingId } });
+    await prisma.availabilityRule.deleteMany({ where: { listingId } });
+    await prisma.listing.deleteMany({ where: { id: listingId } });
+  });
+
+  it("rejects checkout when a hold no longer has a valid backing schedule slot", async () => {
+    const listingId = "lst_checkout_schedule_contract";
+    const customerEmail = "schedule-checkout@example.invalid";
+    await prisma.auditLog.deleteMany({ where: { businessId: DEMO_BUSINESS_ID, entityType: "booking" } });
+    await prisma.booking.deleteMany({ where: { listingId } });
+    await prisma.bookingHold.deleteMany({ where: { listingId } });
+    await prisma.availabilityRule.deleteMany({ where: { listingId } });
+    await prisma.listing.deleteMany({ where: { id: listingId } });
+    await prisma.listing.create({
+      data: {
+        id: listingId,
+        businessId: DEMO_BUSINESS_ID,
+        title: "Checkout Schedule Contract",
+        category: "Tour",
+        status: "active",
+        basePriceCents: 2500,
+        durationMinutes: 30,
+        minGuests: 1,
+        maxGuests: 6,
+        capacity: 6,
+        imageUrlsJson: "[]"
+      }
+    });
+    await prisma.availabilityRule.create({
+      data: {
+        id: "av_checkout_schedule_valid_rule",
+        businessId: DEMO_BUSINESS_ID,
+        listingId,
+        dayOfWeek: 2,
+        startTime: "9:00 AM",
+        endTime: "10:00 AM",
+        slotIntervalMinutes: 30,
+        capacity: 6,
+        effectiveStartDate: "2026-05-01"
+      }
+    });
+    const quote = await publicApi.quote({
+      listingId,
+      date: "2026-05-12",
+      startTime: "9:00 AM",
+      adults: 1,
+      children: 0,
+      addOns: []
+    });
+
+    await prisma.availabilityRule.update({ where: { id: "av_checkout_schedule_valid_rule" }, data: { slotIntervalMinutes: 0 } });
+
+    await expect(
+      publicApi.checkout({
+        holdId: quote.holdId,
+        listingId,
+        date: "2026-05-12",
+        startTime: "9:00 AM",
+        adults: 1,
+        children: 0,
+        addOns: [],
+        customer: { name: "Schedule Tester", email: customerEmail }
+      })
+    ).rejects.toThrow("Selected slot is unavailable");
+    expect(await prisma.booking.count({ where: { listingId, customerEmail } })).toBe(0);
+    expect(await prisma.auditLog.count({ where: { businessId: DEMO_BUSINESS_ID, action: "booking.checkout_started", entityType: "booking" } })).toBe(0);
+
+    await prisma.bookingHold.deleteMany({ where: { listingId } });
+    await prisma.availabilityRule.deleteMany({ where: { listingId } });
+    await prisma.listing.deleteMany({ where: { id: listingId } });
+  });
 });
