@@ -60,7 +60,32 @@ describe("dashboard and public API contracts", () => {
     );
     expect(response.business).not.toHaveProperty("ownerUserId");
     expect(response.business).not.toHaveProperty("taxRateBps");
+    expect(response.business).not.toHaveProperty("id");
+    expect(response.listings[0]).toHaveProperty("id", "lst_harbor_kayak_tour");
+    expect(response.listings[0]).not.toHaveProperty("businessId");
     expect(response.listings[0]).not.toHaveProperty("internalNotes");
+  });
+
+  it("returns public listing detail without tenant identifiers", async () => {
+    const response = await publicApi.listing("lst_harbor_kayak_tour");
+
+    expect(response).toEqual(
+      expect.objectContaining({
+        id: "lst_harbor_kayak_tour",
+        title: "Harbor Kayak Tour",
+        business: expect.objectContaining({
+          name: "Sample Tours Co.",
+          slug: DEMO_BUSINESS_SLUG
+        })
+      })
+    );
+    expect(response).not.toHaveProperty("businessId");
+    expect(response.business).not.toHaveProperty("id");
+    expect(response.business).not.toHaveProperty("ownerUserId");
+    expect(response.business).not.toHaveProperty("taxRateBps");
+    expect(response.addOns[0]).toHaveProperty("id");
+    expect(response.addOns[0]).not.toHaveProperty("businessId");
+    expect(response.addOns[0]).not.toHaveProperty("listingId");
   });
 
   it("logs in, rotates refresh sessions, and logs out", async () => {

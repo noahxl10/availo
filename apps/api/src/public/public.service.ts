@@ -48,7 +48,6 @@ export class PublicService {
       business: publicBusiness(listing.business),
       addOns: listing.addOns.map((addOn) => ({
         id: addOn.id,
-        listingId: addOn.listingId,
         name: addOn.name,
         description: addOn.description,
         priceCents: addOn.priceCents,
@@ -242,7 +241,6 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
 function publicListingSelect() {
   return {
     id: true,
-    businessId: true,
     title: true,
     description: true,
     category: true,
@@ -256,14 +254,13 @@ function publicListingSelect() {
   } as const;
 }
 
-function publicListing<T extends { imageUrlsJson?: string }>(listing: T) {
-  const { imageUrlsJson: _imageUrlsJson, ...safe } = listing;
+function publicListing<T extends { businessId?: string; imageUrlsJson?: string }>(listing: T) {
+  const { businessId: _businessId, imageUrlsJson: _imageUrlsJson, ...safe } = listing;
   return safe;
 }
 
 function publicBusiness(business: { id: string; name: string; slug: string; timezone: string; currency: string; supportEmail: string | null; supportPhone: string | null }) {
   return {
-    id: business.id,
     name: business.name,
     slug: business.slug,
     timezone: business.timezone,

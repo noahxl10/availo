@@ -3,5 +3,25 @@
     "owner": "Availo maintainers",
     "expires": "2026-09-30",
     "reason": "Prisma 6.19.3 currently pins deepmerge-ts 7.1.5 in its configuration toolchain. Availo does not pass user-controlled recursive configuration objects to Prisma. Remove this exception as soon as Prisma ships a compatible fixed dependency."
+  },
+  "https://github.com/advisories/GHSA-wc9g-mqfw-jrwm": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "@nestjs/platform-express 11.2.3 currently pins multer 2.2.0. Availo has no upload, multipart, Multer interceptor, diskStorage, or memoryStorage routes; remove this exception as soon as NestJS ships a patched Multer dependency."
+  },
+  "https://github.com/advisories/GHSA-qfvm-cv95-jqjf": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "@nestjs/platform-express 11.2.3 currently pins multer 2.2.0. Availo has no upload, multipart, Multer interceptor, diskStorage, or memoryStorage routes; remove this exception as soon as NestJS ships a patched Multer dependency."
+  },
+  "https://github.com/advisories/GHSA-qvfw-j98x-7q72": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "@nestjs/platform-express 11.2.3 currently pins multer 2.2.0. Availo has no upload, multipart, Multer interceptor, diskStorage, or memoryStorage routes; remove this exception as soon as NestJS ships a patched Multer dependency."
+  },
+  "https://github.com/advisories/GHSA-535w-7cp7-47q4": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "@nestjs/platform-express 11.2.3 currently pins multer 2.2.0. Availo has no upload, multipart, Multer interceptor, diskStorage, or memoryStorage routes; remove this exception as soon as NestJS ships a patched Multer dependency."
   }
 }
