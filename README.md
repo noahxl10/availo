@@ -76,7 +76,9 @@ npm run start:dashboard
 | `npm run typecheck` | Typecheck all workspaces. |
 | `npm test` | Run workspace tests. |
 | `npm run db:generate` | Generate the Prisma client. |
-| `npm run db:migrate` | Apply local Prisma migrations. |
+| `npm run db:replay:check` | Verify checked-in migrations and seed data against a disposable SQLite database. |
+| `npm run db:migrate` | Replay checked-in Prisma migrations. |
+| `npm run db:migrate:dev -- --name <name>` | Create a new local Prisma migration while developing. |
 | `npm run db:seed` | Load demo seed data. |
 
 ## Project status

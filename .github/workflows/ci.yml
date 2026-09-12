@@ -38,6 +38,9 @@ jobs:
       - name: Generate Prisma client
         run: npm run db:generate
 
+      - name: Verify clean SQLite migration replay
+        run: npm run db:replay:check
+
       - name: Apply database migrations
         run: |
           touch apps/api/prisma/ci.db

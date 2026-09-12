@@ -3,5 +3,25 @@
     "owner": "Availo maintainers",
     "expires": "2026-09-30",
     "reason": "Prisma 6.19.3 currently pins deepmerge-ts 7.1.5 in its configuration toolchain. Availo does not pass user-controlled recursive configuration objects to Prisma. Remove this exception as soon as Prisma ships a compatible fixed dependency."
+  },
+  "https://github.com/advisories/GHSA-wc9g-mqfw-jrwm": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "NestJS platform-express 11.2.3 currently pins multer 2.2.0. Availo has no multipart upload routes or Multer interceptors, so user-controlled multipart fields are not accepted by application handlers. Remove this exception as soon as NestJS ships a patched multer dependency."
+  },
+  "https://github.com/advisories/GHSA-qfvm-cv95-jqjf": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "NestJS platform-express 11.2.3 currently pins multer 2.2.0. Availo has no multipart upload routes or Multer interceptors, so user-controlled file uploads are not accepted by application handlers. Remove this exception as soon as NestJS ships a patched multer dependency."
+  },
+  "https://github.com/advisories/GHSA-qvfw-j98x-7q72": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "NestJS platform-express 11.2.3 currently pins multer 2.2.0. Availo has no multipart upload routes, Multer interceptors, or async file filters, so file-size filter bypass is not reachable in application handlers. Remove this exception as soon as NestJS ships a patched multer dependency."
+  },
+  "https://github.com/advisories/GHSA-535w-7cp7-47q4": {
+    "owner": "Availo maintainers",
+    "expires": "2026-09-30",
+    "reason": "NestJS platform-express 11.2.3 currently pins multer 2.2.0. Availo has no multipart upload routes or Multer interceptors, so oversized multipart field arrays are not accepted by application handlers. Remove this exception as soon as NestJS ships a patched multer dependency."
   }
 }

@@ -75,6 +75,16 @@ SQLite is the current default and works well for evaluation and small installs. 
 
 The Prisma schema is in `apps/api/prisma/schema.prisma`. If you switch providers, update the datasource and create new migrations before deploying.
 
+`npm run db:migrate` replays checked-in migrations with Prisma Migrate and is the safe command for installs, upgrades, CI, and self-hosted deployments. Contributors who intentionally change the Prisma schema can create a new local migration with `npm run db:migrate:dev -- --name <name>`.
+
+To verify a clean SQLite install before opening a pull request or upgrading a small self-hosted deployment, run:
+
+```sh
+npm run db:replay:check
+```
+
+The verifier uses a disposable SQLite database, applies the checked-in migrations, runs the seed command, and confirms the seeded business, listing, and booking rows exist.
+
 ## Upgrades
 
 ```sh

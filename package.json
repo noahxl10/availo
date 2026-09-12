@@ -16,8 +16,10 @@
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "audit:production": "node scripts/check-npm-audit.mjs",
+    "db:replay:check": "node scripts/check-sqlite-migration-replay.mjs",
     "db:generate": "npm run prisma:generate --workspace @availo/api",
     "db:migrate": "npm run prisma:migrate --workspace @availo/api",
+    "db:migrate:dev": "npm --workspace @availo/api run prisma:migrate:dev --",
     "db:seed": "npm run prisma:seed --workspace @availo/api"
   },
   "devDependencies": {
