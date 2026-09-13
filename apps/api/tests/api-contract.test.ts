@@ -1,6 +1,8 @@
+import { BadRequestException } from "@nestjs/common";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import argon2 from "argon2";
 import { AuthController } from "../src/auth/auth.controller.js";
+import { BusinessController } from "../src/businesses/business.controller.js";
 import { DEMO_BUSINESS_ID, DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
 import { prefixedId } from "../src/common/ids.js";
 import { DashboardService } from "../src/dashboard/dashboard.service.js";
@@ -12,6 +14,7 @@ import { PrismaService } from "../src/prisma/prisma.service.js";
 describe("dashboard and public API contracts", () => {
   const prisma = new PrismaService();
   const auth = new AuthController(prisma);
+  const businesses = new BusinessController(prisma);
   const dashboard = new DashboardService(prisma);
   const payments = new PaymentController(prisma);
   const publicApi = new PublicService(prisma);
@@ -95,6 +98,22 @@ describe("dashboard and public API contracts", () => {
     const activeSessions = await prisma.session.count({ where: { userId: "usr_demo_owner", revokedAt: null } });
     expect(activeSessions).toBe(1);
     await prisma.session.deleteMany({ where: { userId: "usr_demo_owner" } });
+  });
+
+  it("returns bad requests for malformed controller payloads without side effects", async () => {
+    const sessionCount = await prisma.session.count();
+    await expect(auth.login({ email: "not-an-email", password: "local-password" })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(auth.refresh({ refreshToken: 123 })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(auth.logout(null)).rejects.toBeInstanceOf(BadRequestException);
+    expect(await prisma.session.count()).toBe(sessionCount);
+
+    const businessCount = await prisma.business.count();
+    await expect(businesses.create({ name: "Bad Slug Outfit", slug: "Bad Slug!" })).rejects.toBeInstanceOf(BadRequestException);
+    expect(await prisma.business.count()).toBe(businessCount);
+
+    const paymentEventCount = await prisma.paymentEvent.count();
+    await expect(payments.mockConfirm({ bookingId: "" })).rejects.toBeInstanceOf(BadRequestException);
+    expect(await prisma.paymentEvent.count()).toBe(paymentEventCount);
   });
 
   it("creates a capacity hold and checkout keeps booking pending until payment confirmation", async () => {

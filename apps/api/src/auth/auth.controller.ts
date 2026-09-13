@@ -4,9 +4,11 @@ import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { DEMO_BUSINESS_ID } from "../common/tenant.js";
+import { parseBody } from "../common/validation.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const credentials = z.object({ email: z.string().email(), password: z.string().min(8) });
+const refreshInput = z.object({ refreshToken: z.string().min(1).optional() });
 
 @Controller("auth")
 export class AuthController {
@@ -14,7 +16,7 @@ export class AuthController {
 
   @Post("email/register")
   async register(@Body() body: unknown) {
-    const input = credentials.parse(body);
+    const input = parseBody(credentials, body);
     const passwordHash = await argon2.hash(input.password);
     const user = await this.prisma.user.create({
       data: {
@@ -33,7 +35,7 @@ export class AuthController {
 
   @Post("email/login")
   async login(@Body() body: unknown) {
-    const input = credentials.parse(body);
+    const input = parseBody(credentials, body);
     const user = await this.prisma.user.findFirst({ where: { businessId: DEMO_BUSINESS_ID, email: input.email } });
     if (!user?.passwordHash || !(await argon2.verify(user.passwordHash, input.password))) {
       return { ok: false, error: "Invalid credentials" };
@@ -45,10 +47,11 @@ export class AuthController {
   }
 
   @Post("refresh")
-  async refresh(@Body() body: { refreshToken?: string }) {
-    if (!body.refreshToken) return { ok: false, error: "Missing refresh token" };
+  async refresh(@Body() body: unknown) {
+    const input = parseBody(refreshInput, body);
+    if (!input.refreshToken) return { ok: false, error: "Missing refresh token" };
     const sessions = await this.prisma.session.findMany({ where: { revokedAt: null, expiresAt: { gt: new Date() } } });
-    const session = await firstMatchingSession(sessions, body.refreshToken);
+    const session = await firstMatchingSession(sessions, input.refreshToken);
     if (!session) {
       return { ok: false, error: "Invalid refresh token" };
     }
@@ -57,10 +60,11 @@ export class AuthController {
   }
 
   @Post("logout")
-  async logout(@Body() body: { refreshToken?: string }) {
-    if (body.refreshToken) {
+  async logout(@Body() body: unknown) {
+    const input = parseBody(refreshInput, body);
+    if (input.refreshToken) {
       const sessions = await this.prisma.session.findMany({ where: { businessId: DEMO_BUSINESS_ID, revokedAt: null } });
-      const match = await firstMatchingSession(sessions, body.refreshToken);
+      const match = await firstMatchingSession(sessions, input.refreshToken);
       if (match) await this.prisma.session.update({ where: { id: match.id }, data: { revokedAt: new Date() } });
     }
     return { ok: true };

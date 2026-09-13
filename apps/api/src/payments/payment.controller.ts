@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Headers, Inject, Param, Post } from "@nestjs/common";
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
+import { parseBody } from "../common/validation.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const confirmInput = z.object({
@@ -24,14 +25,14 @@ export class PaymentController {
 
   @Post("payments/mock/confirm")
   async mockConfirm(@Body() body: unknown) {
-    const input = confirmInput.parse(body);
+    const input = parseBody(confirmInput, body);
     return this.confirmBooking(input.bookingId, "mock", input.providerEventId, "payment.confirmed", body);
   }
 
   @Post("payments/stripe/webhook")
   async stripeWebhook(@Body() body: unknown, @Headers("stripe-signature") signature?: string) {
     if ((process.env.STRIPE_WEBHOOK_SECRET ?? "") && !signature) throw new BadRequestException("Missing Stripe signature");
-    const event = stripeEventInput.parse(body);
+    const event = parseBody(stripeEventInput, body);
     const bookingId = event.data.object.metadata?.bookingId;
     if (!bookingId) throw new BadRequestException("Missing booking metadata");
     return this.confirmBooking(bookingId, "stripe", event.id, event.type, body);

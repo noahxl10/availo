@@ -2,6 +2,7 @@ import { Body, Controller, Get, Inject, Param, Patch, Post } from "@nestjs/commo
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { DEMO_BUSINESS_ID } from "../common/tenant.js";
+import { parseBody } from "../common/validation.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const businessInput = z.object({
@@ -23,7 +24,7 @@ export class BusinessController {
 
   @Post()
   async create(@Body() body: unknown) {
-    const input = businessInput.parse(body);
+    const input = parseBody(businessInput, body);
     return this.prisma.business.create({
       data: {
         id: prefixedId("biz"),
@@ -39,7 +40,7 @@ export class BusinessController {
 
   @Patch()
   async update(@Body() body: unknown) {
-    const input = businessInput.partial().parse(body);
+    const input = parseBody(businessInput.partial(), body);
     return this.prisma.business.update({ where: { id: DEMO_BUSINESS_ID }, data: cleanUndefined(input) });
   }
 
