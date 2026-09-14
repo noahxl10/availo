@@ -71,6 +71,7 @@ For a public install, set at least:
 Run the production build with:
 
 ```sh
+npm run config:check -- --production
 npm run build
 npm run start:api
 npm run start:dashboard
@@ -85,6 +86,7 @@ npm run start:dashboard
 | `npm run build` | Build all workspaces that expose a build script. |
 | `npm run typecheck` | Typecheck all workspaces. |
 | `npm test` | Run workspace tests. |
+| `npm run config:check` | Check self-host environment files; pass `-- --production` before deploying. |
 | `npm run db:generate` | Generate the Prisma client. |
 | `npm run db:migrate` | Apply local Prisma migrations. |
 | `npm run db:seed` | Load demo seed data. |
