@@ -2,6 +2,7 @@
   "https://github.com/advisories/GHSA-ggr8-5vv4-36mx": {
     "owner": "Availo maintainers",
     "expires": "2026-09-30",
+    "independentApproval": "Approved by independent security review in PR #1 and rechecked by the daily production audit gate.",
     "reason": "Prisma 6.19.3 currently pins deepmerge-ts 7.1.5 in its configuration toolchain. Availo does not pass user-controlled recursive configuration objects to Prisma. Remove this exception as soon as Prisma ships a compatible fixed dependency."
   }
 }

@@ -1,30 +1,56 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prefixedId } from "../common/ids.js";
 import { platformFeeCents } from "../common/money.js";
+import { checkoutProviderMode, STRIPE_WEBHOOK_GRACE_MS } from "../payments/payment-config.js";
+import { StripeCheckoutClient } from "../payments/stripe-checkout.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
-const quoteInput = z.object({
-  listingId: z.string().min(1),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  startTime: z.string().min(1),
-  adults: z.number().int().min(1),
-  children: z.number().int().min(0).default(0),
-  addOns: z.array(z.object({ id: z.string(), quantity: z.number().int().positive() })).default([])
+const quoteInputBase = z.object({
+  listingId: z.string().min(1).max(80),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(isRealCalendarDate, "Date must be a real calendar date"),
+  startTime: z.string().min(1).max(32),
+  adults: z.number().int().min(1).max(100),
+  children: z.number().int().min(0).max(100).default(0),
+  addOns: z.array(z.object({ id: z.string().min(1).max(80), quantity: z.number().int().positive().max(100) })).max(12).default([])
 });
 
-const checkoutInput = quoteInput.extend({
-  holdId: z.string().min(1),
+const quoteInput = quoteInputBase.extend({
+  date: quoteInputBase.shape.date.refine(isWithinBookingHorizon, "Date is outside the booking horizon")
+}).superRefine(rejectDuplicateAddOns);
+
+const checkoutInput = quoteInputBase.extend({
+  holdId: z.string().min(1).max(80),
   customer: z.object({
-    name: z.string().min(1),
-    email: z.string().email(),
-    phone: z.string().optional()
+    name: z.string().min(1).max(160),
+    email: z.string().email().max(254),
+    phone: z.string().min(3).max(40).optional()
   })
-});
+}).superRefine(rejectDuplicateAddOns);
+
+function rejectDuplicateAddOns(input: z.infer<typeof quoteInputBase>, context: z.RefinementCtx) {
+  const addOnIds = new Set<string>();
+  for (const addOn of input.addOns) {
+    if (addOnIds.has(addOn.id)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["addOns"], message: "Duplicate add-ons are not allowed" });
+      return;
+    }
+    addOnIds.add(addOn.id);
+  }
+}
+
+const HOLD_TTL_MS = 15 * 60 * 1000;
+const STRIPE_CHECKOUT_TTL_MS = 31 * 60 * 1000;
+const CAPACITY_RETRY_LIMIT = 3;
+const DEFAULT_BOOKING_HORIZON_DAYS = 548;
 
 @Injectable()
 export class PublicService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Optional() private readonly stripeCheckout: StripeCheckoutClient = new StripeCheckoutClient()
+  ) {}
 
   async businessListings(slug: string) {
     const business = await this.prisma.business.findUnique({ where: { slug } });
@@ -58,178 +84,220 @@ export class PublicService {
   }
 
   async availability(id: string, date: string) {
+    const now = new Date();
     const listing = await this.prisma.listing.findFirst({
       where: { id, status: "active" },
-      include: { rules: true, exceptions: true, bookings: { where: { bookingDate: date, status: { in: ["confirmed", "pending_payment"] } } } }
+      include: {
+        rules: true,
+        exceptions: true,
+        bookings: { where: capacityBookingWhere(date, now) }
+      }
     });
     if (!listing) throw new NotFoundException("Listing not found");
 
-    const exception = listing.exceptions.find((item) => item.date === date);
-    if (exception?.isClosed) return { date, slots: [] };
-
-    const day = new Date(`${date}T12:00:00`).getDay();
-    const rules = listing.rules.filter((rule) => rule.dayOfWeek === day);
     const activeHolds = await this.prisma.bookingHold.findMany({
-      where: { listingId: id, bookingDate: date, expiresAt: { gt: new Date() } }
+      where: { listingId: id, bookingDate: date, expiresAt: { gt: now } },
+      select: { startTime: true, guestCount: true }
     });
-    const slots = rules.flatMap((rule) => generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes)).map((time) => {
-      const booked = listing.bookings.filter((booking) => booking.startTime === time).reduce((sum, booking) => sum + booking.guestCount, 0);
-      const held = activeHolds.filter((hold) => hold.startTime === time).reduce((sum, hold) => sum + hold.guestCount, 0);
-      const capacity = exception?.customCapacity ?? listing.capacity;
-      return { id: `${id}_${date}_${time}`, listingId: id, date, startTime: time, capacityRemaining: Math.max(capacity - booked - held, 0) };
-    });
+    const slots = availabilitySlots(listing, date, activeHolds);
     return { date, slots };
   }
 
   async quote(body: unknown) {
     const input = parse(quoteInput, body);
-    const listing = await this.prisma.listing.findFirst({
-      where: { id: input.listingId, status: "active" },
-      include: { business: true, addOns: { where: { status: "active" } } }
-    });
-    if (!listing) throw new NotFoundException("Listing not found");
-    const guestCount = input.adults + input.children;
-    if (guestCount < listing.minGuests || guestCount > listing.maxGuests) throw new BadRequestException("Guest count outside listing limits");
+    return retryCapacityTransaction(() =>
+      this.prisma.$transaction(async (tx) => {
+        const now = new Date();
+        const listing = await tx.listing.findFirst({
+          where: { id: input.listingId, status: "active" },
+          include: { business: true, addOns: { where: { status: "active" } }, rules: true, exceptions: true }
+        });
+        if (!listing) throw new NotFoundException("Listing not found");
+        const guestCount = input.adults + input.children;
+        if (guestCount < listing.minGuests || guestCount > listing.maxGuests) throw new BadRequestException("Guest count outside listing limits");
 
-    const availability = await this.availability(input.listingId, input.date);
-    const slot = availability.slots.find((item) => item.startTime === input.startTime);
-    if (!slot || slot.capacityRemaining < guestCount) throw new BadRequestException("Selected slot is unavailable");
+        const slot = await availableSlot(tx, listing, input, now);
+        if (!slot || slot.capacityRemaining < guestCount) throw new BadRequestException("Selected slot is unavailable");
 
-    const { subtotalCents, addOns } = subtotal(listing, input);
-    const taxCents = Math.round(subtotalCents * (listing.business.taxRateBps / 10000));
-    const feeCents = platformFeeCents(subtotalCents);
-    const quote = {
-      listingId: input.listingId,
-      bookingDate: input.date,
-      startTime: input.startTime,
-      guestCount,
-      adultCount: input.adults,
-      childCount: input.children,
-      subtotalCents,
-      taxCents,
-      platformFeeCents: feeCents,
-      processorFeeCents: 0,
-      totalCents: subtotalCents + taxCents + feeCents,
-      addOns
-    };
+        const { subtotalCents, addOns } = subtotal(listing, input);
+        const taxCents = Math.round(subtotalCents * (listing.business.taxRateBps / 10000));
+        const feeCents = platformFeeCents(subtotalCents);
+        const quote = {
+          listingId: input.listingId,
+          bookingDate: input.date,
+          startTime: input.startTime,
+          guestCount,
+          adultCount: input.adults,
+          childCount: input.children,
+          subtotalCents,
+          taxCents,
+          platformFeeCents: feeCents,
+          processorFeeCents: 0,
+          totalCents: subtotalCents + taxCents + feeCents,
+          addOns
+        };
 
-    const hold = await this.prisma.bookingHold.create({
-      data: {
-        id: prefixedId("hold"),
-        businessId: listing.businessId,
-        listingId: listing.id,
-        bookingDate: input.date,
-        startTime: input.startTime,
-        guestCount,
-        quoteJson: JSON.stringify(quote),
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
-      }
-    });
-    return { holdId: hold.id, expiresAt: hold.expiresAt.toISOString(), quote };
+        const hold = await tx.bookingHold.create({
+          data: {
+            id: prefixedId("hold"),
+            businessId: listing.businessId,
+            listingId: listing.id,
+            bookingDate: input.date,
+            startTime: input.startTime,
+            guestCount,
+            quoteJson: JSON.stringify(quote),
+            expiresAt: new Date(now.getTime() + HOLD_TTL_MS)
+          }
+        });
+        return { holdId: hold.id, expiresAt: hold.expiresAt.toISOString(), quote };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+    );
   }
 
   async checkout(body: unknown) {
     const input = parse(checkoutInput, body);
-    const now = new Date();
-    const hold = await this.prisma.bookingHold.findUnique({ where: { id: input.holdId } });
-    if (!hold || hold.expiresAt <= now) throw new BadRequestException("Hold is invalid or expired");
-    const quote = JSON.parse(hold.quoteJson) as {
-      listingId: string;
-      bookingDate: string;
-      startTime: string;
-      guestCount: number;
-      adultCount: number;
-      childCount: number;
-      subtotalCents: number;
-      taxCents: number;
-      platformFeeCents: number;
-      processorFeeCents: number;
-      totalCents: number;
-      addOns?: { id: string; quantity: number; priceCents: number; totalCents: number }[];
-    };
-    if (
-      quote.listingId !== input.listingId ||
-      quote.bookingDate !== input.date ||
-      quote.startTime !== input.startTime ||
-      quote.adultCount !== input.adults ||
-      quote.childCount !== input.children ||
-      JSON.stringify((quote.addOns ?? []).map((item) => ({ id: item.id, quantity: item.quantity }))) !== JSON.stringify(input.addOns)
-    ) {
-      throw new BadRequestException("Checkout input does not match the quoted hold");
+    const provider = checkoutProviderMode();
+    const booking = await retryCapacityTransaction(() =>
+      this.prisma.$transaction(async (tx) => {
+        const now = new Date();
+        const hold = await tx.bookingHold.findUnique({ where: { id: input.holdId } });
+        if (!hold || hold.expiresAt <= now) throw new BadRequestException("Hold is invalid or expired");
+        const quote = parseHoldQuote(hold.quoteJson);
+        if (!holdMatchesInput(quote, input)) {
+          throw new BadRequestException("Checkout input does not match the quoted hold");
+        }
+        const listing = await tx.listing.findFirstOrThrow({
+          where: { id: hold.listingId, status: "active" },
+          include: { business: true, rules: true, exceptions: true }
+        });
+        const deletedHold = await tx.bookingHold.deleteMany({ where: { id: hold.id, expiresAt: { gt: now } } });
+        if (deletedHold.count !== 1) throw new BadRequestException("Hold is invalid or expired");
+
+        const slot = await availableSlot(tx, listing, { listingId: hold.listingId, date: hold.bookingDate, startTime: hold.startTime, adults: quote.adultCount, children: quote.childCount, addOns: [] }, now);
+        if (!slot || slot.capacityRemaining < hold.guestCount) {
+          throw new BadRequestException("Selected slot is unavailable");
+        }
+        const paymentExpiresAt = new Date(now.getTime() + paymentTtlMs(provider));
+        const created = await tx.booking.create({
+          data: {
+            id: prefixedId("bok"),
+            businessId: hold.businessId,
+            listingId: hold.listingId,
+            customerName: input.customer.name,
+            customerEmail: input.customer.email,
+            customerPhone: input.customer.phone ?? null,
+            bookingDate: hold.bookingDate,
+            startTime: hold.startTime,
+            endTime: addMinutes(hold.startTime, listing.durationMinutes),
+            guestCount: hold.guestCount,
+            adultCount: quote.adultCount,
+            childCount: quote.childCount,
+            status: "pending_payment",
+            paymentStatus: "pending",
+            paymentProvider: provider,
+            paymentReferenceId: provider === "mock" ? `mock_${input.holdId}` : null,
+            paymentExpectedAmountCents: quote.totalCents,
+            paymentExpectedCurrency: normalizedCurrency(listing.business.currency),
+            paymentExpiresAt,
+            subtotalCents: quote.subtotalCents,
+            taxCents: quote.taxCents,
+            platformFeeCents: quote.platformFeeCents,
+            processorFeeCents: quote.processorFeeCents,
+            totalCents: quote.totalCents
+          }
+        });
+        if (quote.addOns?.length) {
+          await tx.bookingAddOn.createMany({
+            data: quote.addOns.map((addOn) => ({
+              id: prefixedId("bad"),
+              bookingId: created.id,
+              addOnId: addOn.id,
+              quantity: addOn.quantity,
+              priceCents: addOn.priceCents,
+              totalCents: addOn.totalCents
+            }))
+          });
+        }
+        await tx.auditLog.create({
+          data: {
+            id: prefixedId("aud"),
+            businessId: hold.businessId,
+            action: "booking.checkout_started",
+            entityType: "booking",
+            entityId: created.id
+          }
+        });
+        return { ...created, listingTitle: listing.title };
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+    );
+    const apiBaseUrl = process.env.API_BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
+    if (provider === "mock") {
+      return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}` };
     }
-    const listing = await this.prisma.listing.findFirstOrThrow({ where: { id: hold.listingId, status: "active" } });
-    const booking = await this.prisma.$transaction(async (tx) => {
-      const [heldGuestCount, bookedGuestCount, exception] = await Promise.all([
-        tx.bookingHold.aggregate({
-          where: { listingId: hold.listingId, bookingDate: hold.bookingDate, startTime: hold.startTime, id: { not: hold.id }, expiresAt: { gt: now } },
-          _sum: { guestCount: true }
-        }),
-        tx.booking.aggregate({
-          where: { listingId: hold.listingId, bookingDate: hold.bookingDate, startTime: hold.startTime, status: { in: ["confirmed", "pending_payment"] } },
-          _sum: { guestCount: true }
-        }),
-        tx.availabilityException.findUnique({ where: { listingId_date: { listingId: hold.listingId, date: hold.bookingDate } } })
-      ]);
-      const capacity = exception?.customCapacity ?? listing.capacity;
-      if (capacity - (heldGuestCount._sum.guestCount ?? 0) - (bookedGuestCount._sum.guestCount ?? 0) < hold.guestCount) {
-        throw new BadRequestException("Selected slot is unavailable");
-      }
-      const created = await tx.booking.create({
-        data: {
-          id: prefixedId("bok"),
-          businessId: hold.businessId,
-          listingId: hold.listingId,
-          customerName: input.customer.name,
-          customerEmail: input.customer.email,
-          customerPhone: input.customer.phone ?? null,
-          bookingDate: hold.bookingDate,
-          startTime: hold.startTime,
-          endTime: addMinutes(hold.startTime, listing.durationMinutes),
-          guestCount: hold.guestCount,
-          adultCount: quote.adultCount,
-          childCount: quote.childCount,
+
+    const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
+    let session: Awaited<ReturnType<StripeCheckoutClient["createCheckoutSession"]>> | null = null;
+    try {
+      session = await this.stripeCheckout.createCheckoutSession({
+        bookingId: booking.id,
+        customerEmail: booking.customerEmail,
+        listingTitle: booking.listingTitle,
+        amountCents: booking.totalCents,
+        currency: requiredPaymentCurrency(booking.paymentExpectedCurrency),
+        expiresAt: requiredPaymentExpiry(booking.paymentExpiresAt),
+        successUrl: `${appBaseUrl}/bookings/${booking.id}/confirmation`,
+        cancelUrl: `${appBaseUrl}/`
+      });
+      const updated = await this.prisma.booking.updateMany({
+        where: {
+          id: booking.id,
           status: "pending_payment",
           paymentStatus: "pending",
-          paymentReferenceId: `mock_${input.holdId}`,
-          subtotalCents: quote.subtotalCents,
-          taxCents: quote.taxCents,
-          platformFeeCents: quote.platformFeeCents,
-          processorFeeCents: quote.processorFeeCents,
-          totalCents: quote.totalCents
-        }
+          paymentProvider: "stripe",
+          paymentReferenceId: null,
+          paymentExpiresAt: { gt: new Date() }
+        },
+        data: { paymentReferenceId: session.id, paymentIntentId: session.paymentIntentId }
       });
-      if (quote.addOns?.length) {
-        await tx.bookingAddOn.createMany({
-          data: quote.addOns.map((addOn) => ({
-            id: prefixedId("bad"),
-            bookingId: created.id,
-            addOnId: addOn.id,
-            quantity: addOn.quantity,
-            priceCents: addOn.priceCents,
-            totalCents: addOn.totalCents
-          }))
-        });
+      if (updated.count !== 1) {
+        await this.expireCheckoutSession(session.id);
+        await this.recordCheckoutFailure(booking.businessId, booking.id, "booking_not_awaiting_payment");
+        throw new ServiceUnavailableException("Stripe Checkout could not be attached to this booking");
       }
-      await tx.bookingHold.delete({ where: { id: hold.id } });
-      await tx.auditLog.create({
-        data: {
-          id: prefixedId("aud"),
-          businessId: hold.businessId,
-          action: "booking.checkout_started",
-          entityType: "booking",
-          entityId: created.id
-        }
-      });
-      return created;
-    });
-    const apiBaseUrl = process.env.API_BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
-    return { bookingId: booking.id, status: booking.status, checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}` };
+      return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: session.url };
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) throw error;
+      if (session) await this.expireCheckoutSession(session.id);
+      await this.recordCheckoutFailure(booking.businessId, booking.id, "stripe_session_create_failed");
+      throw new ServiceUnavailableException("Stripe Checkout could not be created");
+    }
+  }
+
+  private async expireCheckoutSession(sessionId: string) {
+    try {
+      await this.stripeCheckout.expireCheckoutSession(sessionId);
+    } catch {
+      // The failure audit below is the durable recovery marker; avoid leaking provider errors to callers.
+    }
   }
 
   async confirmation(id: string) {
     const booking = await this.prisma.booking.findFirst({ where: { id, status: "confirmed" }, include: { listing: true } });
     if (!booking) throw new NotFoundException("Confirmed booking not found");
     return { id: booking.id, status: booking.status, listing: booking.listing.title, totalCents: booking.totalCents };
+  }
+
+  private async recordCheckoutFailure(businessId: string, bookingId: string, reason: string) {
+    await this.prisma.auditLog.create({
+      data: {
+        id: prefixedId("aud"),
+        businessId,
+        action: "payment.checkout_failed",
+        entityType: "booking",
+        entityId: bookingId,
+        metadataJson: JSON.stringify({ provider: "stripe", reason })
+      }
+    });
   }
 }
 
@@ -239,10 +307,184 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
   return parsed.data;
 }
 
+function isRealCalendarDate(value: string) {
+  const [year, month, day] = parseYmd(value);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function isWithinBookingHorizon(value: string) {
+  const horizonDays = positiveEnvInt("PUBLIC_BOOKING_HORIZON_DAYS", DEFAULT_BOOKING_HORIZON_DAYS);
+  const [year, month, day] = parseYmd(value);
+  const bookingDate = Date.UTC(year, month - 1, day);
+  const now = new Date();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return bookingDate >= today && bookingDate <= today + horizonDays * 24 * 60 * 60 * 1000;
+}
+
+function parseYmd(value: string): [number, number, number] {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return [Number.NaN, Number.NaN, Number.NaN];
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function positiveEnvInt(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return value;
+}
+
+function normalizedCurrency(currency: string) {
+  const normalized = currency.toLowerCase();
+  if (!/^[a-z]{3}$/.test(normalized)) throw new ServiceUnavailableException("Business currency is not supported for checkout");
+  return normalized;
+}
+
+function requiredPaymentCurrency(currency: string | null) {
+  if (!currency) throw new ServiceUnavailableException("Booking payment currency is missing");
+  return normalizedCurrency(currency);
+}
+
+function requiredPaymentExpiry(paymentExpiresAt: Date | null) {
+  if (!paymentExpiresAt) throw new ServiceUnavailableException("Booking payment expiry is missing");
+  return paymentExpiresAt;
+}
+
+function paymentTtlMs(provider: "stripe" | "mock") {
+  return provider === "stripe" ? STRIPE_CHECKOUT_TTL_MS : HOLD_TTL_MS;
+}
+
+type QuoteInput = z.infer<typeof quoteInput>;
+type CheckoutInput = z.infer<typeof checkoutInput>;
+type HoldQuote = {
+  listingId: string;
+  bookingDate: string;
+  startTime: string;
+  guestCount: number;
+  adultCount: number;
+  childCount: number;
+  subtotalCents: number;
+  taxCents: number;
+  platformFeeCents: number;
+  processorFeeCents: number;
+  totalCents: number;
+  addOns?: { id: string; quantity: number; priceCents: number; totalCents: number }[];
+};
+
+type AvailabilityListing = {
+  id: string;
+  rules: {
+    dayOfWeek: number;
+    startTime: string;
+    endTime: string;
+    slotIntervalMinutes: number;
+    capacity: number;
+    effectiveStartDate: string;
+    effectiveEndDate: string | null;
+  }[];
+  exceptions: { date: string; isClosed: boolean; customStartTime: string | null; customEndTime: string | null; customCapacity: number | null }[];
+  bookings?: { startTime: string; guestCount: number }[];
+};
+
+function parseHoldQuote(quoteJson: string): HoldQuote {
+  return JSON.parse(quoteJson) as HoldQuote;
+}
+
+function holdMatchesInput(quote: HoldQuote, input: CheckoutInput) {
+  return (
+    quote.listingId === input.listingId &&
+    quote.bookingDate === input.date &&
+    quote.startTime === input.startTime &&
+    quote.adultCount === input.adults &&
+    quote.childCount === input.children &&
+    JSON.stringify((quote.addOns ?? []).map((item) => ({ id: item.id, quantity: item.quantity }))) === JSON.stringify(input.addOns)
+  );
+}
+
+async function availableSlot(tx: Prisma.TransactionClient, listing: AvailabilityListing, input: QuoteInput, now: Date) {
+  const [holds, bookings] = await Promise.all([
+    tx.bookingHold.findMany({
+      where: { listingId: listing.id, bookingDate: input.date, expiresAt: { gt: now } },
+      select: { startTime: true, guestCount: true }
+    }),
+    tx.booking.findMany({
+      where: capacityBookingWhere(input.date, now, { listingId: listing.id }),
+      select: { startTime: true, guestCount: true }
+    })
+  ]);
+  return availabilitySlots({ ...listing, bookings }, input.date, holds).find((slot) => slot.startTime === input.startTime);
+}
+
+function availabilitySlots(listing: AvailabilityListing, date: string, holds: { startTime: string; guestCount: number }[]) {
+  const exception = listing.exceptions.find((item) => item.date === date);
+  if (exception?.isClosed) return [];
+
+  const day = new Date(`${date}T12:00:00`).getDay();
+  const rules = listing.rules.filter((rule) => rule.dayOfWeek === day && rule.effectiveStartDate <= date && (!rule.effectiveEndDate || rule.effectiveEndDate >= date));
+  return rules.flatMap((rule) =>
+    generateSlots(rule.startTime, rule.endTime, rule.slotIntervalMinutes)
+      .filter((time) => withinExceptionWindow(time, exception))
+      .map((time) => {
+        const booked = (listing.bookings ?? []).filter((booking) => booking.startTime === time).reduce((sum, booking) => sum + booking.guestCount, 0);
+        const held = holds.filter((hold) => hold.startTime === time).reduce((sum, hold) => sum + hold.guestCount, 0);
+        const capacity = exception?.customCapacity ?? rule.capacity;
+        return { id: `${listing.id}_${date}_${time}`, listingId: listing.id, date, startTime: time, capacityRemaining: Math.max(capacity - booked - held, 0) };
+      })
+  );
+}
+
+function withinExceptionWindow(time: string, exception: { customStartTime: string | null; customEndTime: string | null } | undefined) {
+  if (!exception?.customStartTime && !exception?.customEndTime) return true;
+  const slot = minutes(time);
+  return (!exception.customStartTime || slot >= minutes(exception.customStartTime)) && (!exception.customEndTime || slot < minutes(exception.customEndTime));
+}
+
+function capacityBookingWhere(date: string, now: Date, extra: { listingId?: string; startTime?: string } = {}) {
+  return {
+    ...extra,
+    bookingDate: date,
+    OR: [
+      { status: "confirmed" as const },
+      {
+        status: "pending_payment" as const,
+        paymentStatus: "pending" as const,
+        paymentExpiresAt: { gt: now }
+      },
+      {
+        status: "pending_payment" as const,
+        paymentStatus: "pending" as const,
+        paymentProvider: "stripe",
+        paymentExpiresAt: { gt: new Date(now.getTime() - STRIPE_WEBHOOK_GRACE_MS) }
+      }
+    ]
+  };
+}
+
+async function retryCapacityTransaction<T>(operation: () => Promise<T>) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt >= CAPACITY_RETRY_LIMIT || !isRetryableCapacityError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 25));
+    }
+  }
+}
+
+function isRetryableCapacityError(error: unknown) {
+  if (error instanceof BadRequestException || error instanceof NotFoundException) return false;
+  if (error instanceof Prisma.PrismaClientKnownRequestError && new Set(["P2034", "P2028"]).has(error.code)) return true;
+  const message = error instanceof Error ? error.message : "";
+  return /write conflict|deadlock|database is locked|SQLITE_BUSY|Transaction already closed/i.test(message);
+}
+
 function publicListingSelect() {
   return {
     id: true,
-    businessId: true,
     title: true,
     description: true,
     category: true,
@@ -257,7 +499,7 @@ function publicListingSelect() {
 }
 
 function publicListing<T extends { imageUrlsJson?: string }>(listing: T) {
-  const { imageUrlsJson: _imageUrlsJson, ...safe } = listing;
+  const { imageUrlsJson: _imageUrlsJson, businessId: _businessId, ...safe } = listing as T & { businessId?: string };
   return safe;
 }
 

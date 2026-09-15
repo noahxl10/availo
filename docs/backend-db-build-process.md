@@ -21,7 +21,6 @@ This plan builds the backend for Availo with a local SQLite database first, whil
 ```env
 DATABASE_URL="file:./dev.db"
 JWT_ACCESS_SECRET="local-dev-access-secret"
-JWT_REFRESH_SECRET="local-dev-refresh-secret"
 APP_BASE_URL="http://localhost:3001"
 API_BASE_URL="http://localhost:4000"
 STRIPE_SECRET_KEY=""
@@ -121,7 +120,6 @@ where: {
 3. Implement:
 
 ```http
-POST /auth/email/register
 POST /auth/email/login
 POST /auth/refresh
 POST /auth/logout
@@ -131,10 +129,13 @@ GET  /auth/me
 4. Use short-lived access tokens:
    - 10-15 minutes
 
-5. Use refresh token rotation:
-   - Store hashed refresh tokens in `Session`.
-   - On refresh, invalidate the old token and issue a new one.
-   - On logout, revoke the session.
+5. Use tenant-scoped email login and refresh token rotation:
+   - `POST /auth/email/login` requires strict `businessSlug`, `email`, and `password` input, and only authenticates active users in an active matching business.
+   - Do not expose a demo-bound self-registration endpoint until an explicit onboarding flow exists.
+   - Store only the secret portion of opaque `v1.<sessionId>.<secret>` refresh tokens in `Session`.
+   - On refresh, look up the named session directly, invalidate it, issue a new session, and record the audit atomically.
+   - Treat reuse of a rotated refresh token as a compromised operator session and revoke active sessions for that user and business.
+   - On logout, revoke the named session and record the audit atomically.
 
 6. Add rate limits:
    - login attempts
@@ -161,6 +162,8 @@ GET   /business/public/:slug
    - business updated
    - user login
    - user logout
+
+Operator `GET /business` and `PATCH /business` derive the business from the verified access token. All active operator roles can read settings; only owner/admin can update settings. First-business `POST /business` remains a separate onboarding flow until ownership and session issuance are fully designed.
 
 ## Phase 5: Listings
 
@@ -389,6 +392,8 @@ GET /bookings?limit=25&cursor=...
 GET /listings?limit=50&cursor=...
 ```
 
+`GET /bookings` is an authenticated operator API. It derives the tenant from the verified access token and returns `{ "items": [...], "nextCursor": "..." }`, with `limit` defaulting to `25` and capped at `100`. `GET /bookings/:id` must use the same tenant scope and return a generic `404` for both missing and cross-tenant IDs.
+
 5. Use select projections:
 
 ```ts
@@ -431,6 +436,8 @@ select: {
    - owner/admin can manage settings
    - staff can manage bookings/listings
    - viewer is read-only
+
+Operator `/listings` APIs require a verified access token. Listing list/read routes allow all active operator roles for the authenticated tenant; create, update, and archive require owner, admin, or staff. Cross-tenant listing IDs return the same generic `404` as missing listings.
 
 ## Phase 14: SQLite Now, Neon Later
 
@@ -533,4 +540,3 @@ Run a new migration path in staging. Do not point production at a migrated SQLit
 5. Public embed APIs expose only public-safe data.
 6. Refresh tokens are rotated and stored hashed.
 7. Audit logs exist for operator and payment-sensitive actions.
-

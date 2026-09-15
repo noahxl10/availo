@@ -20,7 +20,7 @@ export type Booking = {
   date: string;
   guests: number;
   total: string;
-  status: Extract<BadgeStatus, "confirmed" | "pending">;
+  status: Extract<BadgeStatus, "confirmed" | "pending" | "cancelled">;
 };
 
 export type Listing = {
