@@ -17,6 +17,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "audit:production": "node scripts/check-npm-audit.mjs",
     "cleanup:expired-reservations": "npm run cleanup:expired-reservations --workspace @availo/api",
+    "audit:production:test": "node --test scripts/check-npm-audit.test.mjs",
     "db:generate": "npm run prisma:generate --workspace @availo/api",
     "db:migrate": "npm run prisma:migrate --workspace @availo/api",
     "db:seed": "npm run prisma:seed --workspace @availo/api"

@@ -52,6 +52,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test dependency audit policy
+        run: npm run audit:production:test
+
       - name: Build
         run: npm run build
 
