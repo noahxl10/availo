@@ -1,11 +1,14 @@
 import argon2 from "argon2";
 import { PrismaClient } from "@prisma/client";
+import { fileURLToPath } from "node:url";
 import { DEMO_BUSINESS_ID, DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
+import { assertDestructiveSeedAllowed } from "./seed-safety.js";
 
-const prisma = new PrismaClient();
 const DEMO_TAX_RATE = 0.085;
 
-async function main() {
+async function main(prisma: PrismaClient) {
+  assertDestructiveSeedAllowed(process.env);
+
   await prisma.auditLog.deleteMany();
   await prisma.paymentEvent.deleteMany();
   await prisma.bookingHold.deleteMany();
@@ -271,12 +274,15 @@ function endTimeFor(startTime: string) {
   return endTimes[startTime] ?? "10:30 AM";
 }
 
-main()
-  .then(async () => {
-    await prisma.$disconnect();
-  })
-  .catch(async (error) => {
-    console.error(error);
-    await prisma.$disconnect();
-    process.exit(1);
-  });
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const prisma = new PrismaClient();
+  main(prisma)
+    .then(async () => {
+      await prisma.$disconnect();
+    })
+    .catch(async (error) => {
+      console.error(error);
+      await prisma.$disconnect();
+      process.exit(1);
+    });
+}
