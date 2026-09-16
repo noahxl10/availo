@@ -32,6 +32,16 @@ describe("demo seed safety guard", () => {
     expect(() => assertDestructiveSeedAllowed(env)).toThrow(/Refusing to reset and seed data/);
   });
 
+  it("blocks malformed configured public URLs without explicit destructive-seed confirmation", () => {
+    const env = {
+      DATABASE_URL: "file:./dev.db",
+      APP_BASE_URL: "book.example.com"
+    };
+
+    expect(isProductionLikeSeedEnvironment(env)).toBe(true);
+    expect(() => assertDestructiveSeedAllowed(env)).toThrow(/Refusing to reset and seed data/);
+  });
+
   it("blocks any non-default database URL without explicit destructive-seed confirmation", () => {
     expect(isProductionLikeSeedEnvironment({ DATABASE_URL: "file:./data/prod.db" })).toBe(true);
     expect(isProductionLikeSeedEnvironment({ DATABASE_URL: "file:../prod.db" })).toBe(true);

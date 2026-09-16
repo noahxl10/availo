@@ -4,10 +4,9 @@ import { fileURLToPath } from "node:url";
 import { DEMO_BUSINESS_ID, DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
 import { assertDestructiveSeedAllowed } from "./seed-safety.js";
 
-const prisma = new PrismaClient();
 const DEMO_TAX_RATE = 0.085;
 
-async function main() {
+async function main(prisma: PrismaClient) {
   assertDestructiveSeedAllowed(process.env);
 
   await prisma.auditLog.deleteMany();
@@ -276,7 +275,8 @@ function endTimeFor(startTime: string) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main()
+  const prisma = new PrismaClient();
+  main(prisma)
     .then(async () => {
       await prisma.$disconnect();
     })

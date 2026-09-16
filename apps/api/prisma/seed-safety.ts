@@ -34,6 +34,6 @@ function isLocalHttpUrl(raw: string | undefined) {
     const url = new URL(raw);
     return new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]).has(url.hostname);
   } catch {
-    return true;
+    return false;
   }
 }
