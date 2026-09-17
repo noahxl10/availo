@@ -41,7 +41,7 @@ API variables live in `apps/api/.env`.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | Yes | Prisma database URL. Defaults to `file:./dev.db` for SQLite. |
+| `DATABASE_URL` | Yes | Prisma database URL. Defaults to `file:./dev.db` for local SQLite demos; production SQLite installs must use an absolute persistent path such as `file:/var/lib/availo/prod.db`. |
 | `JWT_ACCESS_SECRET` | Yes | Secret used to sign short-lived access tokens. Use a long random value. |
 | `APP_BASE_URL` | Yes | Public dashboard URL. Also used as the default CORS origin. |
 | `API_BASE_URL` | Yes | Public API URL used for generated checkout links. |
@@ -103,11 +103,11 @@ Access tokens are bound to their issuing session, so logout, refresh rotation, r
 
 Non-browser API clients continue to use `POST /auth/email/login`, `POST /auth/refresh`, and `POST /auth/logout` with the refresh token in JSON. Browser dashboards use `POST /auth/browser/login`, `/auth/browser/refresh`, and `/auth/browser/logout` instead. These endpoints require an `Origin` exactly matching `CORS_ORIGINS` (or `APP_BASE_URL` when `CORS_ORIGINS` is unset); local development accepts `http://localhost:<port>` and `http://127.0.0.1:<port>` like the CORS default. The browser endpoints put only the opaque refresh token in a host-only `HttpOnly`, `SameSite=Lax` cookie scoped to `/auth/browser`, return the short-lived access token with `Cache-Control: no-store`, and never serialize the refresh token. Browser refresh preserves the same one-time rotation and replay revocation as JSON refresh, so the dashboard uses `navigator.locks` and `BroadcastChannel` to keep refresh single-flight across tabs. Browsers without those coordination APIs fail closed to sign-in instead of risking refresh replay. The cookie is `Secure` in production and when the request is HTTPS. Serve the API and dashboard behind HTTPS in production.
 
-`npm run config:check -- --production` validates the API and dashboard environment files before deployment. It fails when required URLs or secrets are missing, JWT secrets still use example values, production public URLs point at localhost, `CORS_ORIGINS` is wildcarded or missing the dashboard origin, or Stripe is only partially configured. The checker reads `apps/api/.env` and `apps/dashboard/.env.local` by default, then lets real process environment variables override file values so service-manager secrets win. Use `--api-env=path/to/.env` and `--dashboard-env=path/to/.env.local` if your service manager keeps environment files outside the default paths.
+`npm run config:check -- --production` validates the API and dashboard environment files before deployment. It fails when required URLs or secrets are missing, JWT secrets still use example values, production public URLs point at localhost, production SQLite uses a relative database path such as `file:./dev.db`, `CORS_ORIGINS` is wildcarded or missing the dashboard origin, or Stripe is only partially configured. The checker reads `apps/api/.env` and `apps/dashboard/.env.local` by default, then lets real process environment variables override file values so service-manager secrets win. Use `--api-env=path/to/.env` and `--dashboard-env=path/to/.env.local` if your service manager keeps environment files outside the default paths.
 
 ## Database notes
 
-SQLite is the current default and works well for evaluation and small installs. Keep the `apps/api/prisma/dev.db` file on persistent storage and back it up before pulling updates.
+SQLite is the current default and works well for evaluation and small installs. Local demos can use `file:./dev.db`, but production installs should point `DATABASE_URL` at an absolute path on persistent backed-up storage, for example `file:/var/lib/availo/prod.db`.
 
 The Prisma schema is in `apps/api/prisma/schema.prisma`. If you switch providers, update the datasource and create new migrations before deploying.
 

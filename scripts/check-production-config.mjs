@@ -29,6 +29,7 @@ requireValue("APP_BASE_URL", "public dashboard URL");
 requireValue("API_BASE_URL", "public API URL");
 requireValue("NEXT_PUBLIC_API_BASE_URL", "dashboard API URL");
 
+checkDatabaseUrl();
 checkSecret("JWT_ACCESS_SECRET", { forbidden: ["local-dev-access-secret", "replace-with-a-long-random-secret"] });
 if (value("JWT_REFRESH_SECRET")) {
   checkSecret("JWT_REFRESH_SECRET", { forbidden: ["replace-with-a-different-long-random-secret"] });
@@ -61,10 +62,6 @@ if (value("CORS_ORIGINS")) {
     }
     checkOrigin("CORS_ORIGINS", origin, { allowLocalhost: !production });
   }
-}
-
-if (production && value("DATABASE_URL") === "file:./dev.db") {
-  warnings.push("DATABASE_URL uses file:./dev.db; make sure this SQLite file is on persistent backed-up storage.");
 }
 
 if (Boolean(value("STRIPE_SECRET_KEY")) !== Boolean(value("STRIPE_WEBHOOK_SECRET"))) {
@@ -123,6 +120,18 @@ function unquote(rawValue) {
 
 function requireValue(name, label) {
   if (!value(name)) issue(`${name} is required for ${label}.`);
+}
+
+function checkDatabaseUrl() {
+  const databaseUrl = value("DATABASE_URL");
+  if (!databaseUrl) return;
+  if (!databaseUrl.startsWith("file:")) return;
+
+  const sqlitePath = databaseUrl.slice("file:".length);
+  const isAbsoluteFilePath = sqlitePath.startsWith("/") && (!sqlitePath.startsWith("//") || sqlitePath.startsWith("///"));
+  if (!isAbsoluteFilePath) {
+    issue("DATABASE_URL must use an absolute SQLite file path in production, for example file:/var/lib/availo/prod.db.");
+  }
 }
 
 function value(name) {
