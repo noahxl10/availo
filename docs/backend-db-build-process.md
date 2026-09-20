@@ -358,7 +358,7 @@ GET  /public/listings/:id
 GET  /public/listings/:id/availability?date=YYYY-MM-DD
 POST /public/bookings/quote
 POST /public/bookings/checkout
-GET  /public/bookings/:id/confirmation
+GET  /public/bookings/:id/confirmation?receiptToken=...
 ```
 
 2. Public APIs must never expose:

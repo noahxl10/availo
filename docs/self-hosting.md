@@ -91,6 +91,8 @@ Email login and refresh endpoints also use in-process IP plus identity/session r
 
 When `STRIPE_SECRET_KEY` is set, public checkout creates a hosted Stripe Checkout session and binds the pending booking to the returned Checkout Session ID, PaymentIntent ID when available, expected amount, and expected currency. Configure Stripe to send events to `POST /payments/stripe/webhook` and set `STRIPE_WEBHOOK_SECRET`; Availo confirms a booking only after a signed successful Stripe event matches the stored provider IDs and money fields. Stripe checkout reservations use a 31-minute payment expiry, aligned with Stripe's minimum custom Checkout Session expiry with a small clock/request buffer.
 
+Public checkout responses also include a `confirmationUrl` containing a random receipt token. The database stores only the token hash, and `/public/bookings/:id/confirmation` requires that `receiptToken` query parameter after payment confirmation. Existing confirmed bookings that predate this column do not become publicly readable until a future operator-mediated receipt flow issues a token.
+
 Mock checkout is intentionally local-only and is ignored when `STRIPE_SECRET_KEY` is configured. Keep `ALLOW_MOCK_PAYMENTS` false or unset in production.
 
 Refund requests also fail closed until Availo has an authenticated refund provider flow.

@@ -54,8 +54,8 @@ export class PublicController {
   }
 
   @Get("bookings/:id/confirmation")
-  confirmation(@Param("id") id: string) {
-    return this.publicApi.confirmation(id);
+  confirmation(@Param("id") id: string, @Query("receiptToken") receiptToken: unknown) {
+    return this.publicApi.confirmation(id, receiptToken);
   }
 }
 

@@ -47,6 +47,8 @@ For local checkout demos, set `ALLOW_MOCK_PAYMENTS="true"` in `apps/api/.env`. F
 
 Public quote creation and checkout are rate limited per client IP by default for small self-hosted installs. See `docs/self-hosting.md` before changing public rate-limit settings or enabling proxy IP trust with `TRUST_PROXY_HOPS`.
 
+Checkout responses include a public booking confirmation URL with a bearer-style receipt token. Availo stores only a hash of that token, so `/public/bookings/:id/confirmation` requires the `receiptToken` query parameter and never exposes confirmed bookings by ID alone.
+
 ### First-run behavior
 
 The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL` and signs operators in with the browser session endpoints; if authentication or the API is unavailable, it shows an explicit status instead of substituting mock data. Email login is tenant-scoped and requires a business slug, email, and password for an active user in an active matching business. The demo-bound registration route is intentionally unavailable; use an explicit onboarding flow when one is implemented.

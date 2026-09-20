@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import argon2 from "argon2";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { AuthController } from "../src/auth/auth.controller.js";
 import { AuthLoginIdentityRateLimiter, AuthLoginIpRateLimiter, AuthRefreshIpRateLimiter, AuthRefreshSessionRateLimiter } from "../src/auth/auth-rate-limit.js";
 import { DEMO_BUSINESS_ID, DEMO_BUSINESS_SLUG } from "../src/common/tenant.js";
@@ -231,6 +231,10 @@ describe("dashboard and public API contracts", () => {
 
       try {
         expect(checkout.status).toBe("pending_payment");
+        expect(checkout.confirmationUrl).toMatch(new RegExp(`/public/bookings/${checkout.bookingId}/confirmation\\?receiptToken=[A-Za-z0-9_-]{43}$`));
+        const receiptToken = new URL(checkout.confirmationUrl).searchParams.get("receiptToken");
+        if (!receiptToken) throw new Error("Expected receipt token in confirmation URL");
+        await expect(publicApi.confirmation(checkout.bookingId, receiptToken)).rejects.toThrow("Confirmed booking not found");
         await expect(
           publicApi.checkout({
             holdId: quote.holdId,
@@ -253,6 +257,18 @@ describe("dashboard and public API contracts", () => {
         expect(duplicate).toEqual({ ok: true, duplicate: true, bookingId: checkout.bookingId });
         const confirmed = await prisma.booking.findUniqueOrThrow({ where: { id: checkout.bookingId } });
         expect(confirmed.status).toBe("confirmed");
+        expect(confirmed.receiptTokenHash).toBe(createHash("sha256").update(receiptToken).digest("hex"));
+        await expect(publicApi.confirmation(checkout.bookingId, undefined)).rejects.toThrow("Confirmed booking not found");
+        await expect(publicApi.confirmation(checkout.bookingId, "not-a-token")).rejects.toThrow("Confirmed booking not found");
+        await expect(publicApi.confirmation(checkout.bookingId, "A".repeat(43))).rejects.toThrow("Confirmed booking not found");
+        await expect(publicApi.confirmation(checkout.bookingId, receiptToken)).resolves.toEqual({
+          id: checkout.bookingId,
+          status: "confirmed",
+          listing: "Harbor Kayak Tour",
+          totalCents: confirmed.totalCents
+        });
+        const auditLogs = await prisma.auditLog.findMany({ where: { entityId: checkout.bookingId } });
+        expect(JSON.stringify(auditLogs)).not.toContain(receiptToken);
       } finally {
         await prisma.paymentEvent.deleteMany({ where: { bookingId: checkout.bookingId } });
         await prisma.booking.deleteMany({ where: { customerEmail: "tester@example.com" } });
@@ -339,7 +355,7 @@ describe("dashboard and public API contracts", () => {
           customerEmail: "stripe-checkout@example.com",
           amountCents: quote.quote.totalCents,
           currency: "usd",
-          successUrl: `https://app.availo.test/bookings/${checkout.bookingId}/confirmation`
+          successUrl: expect.stringMatching(new RegExp(`^https://app\\.availo\\.test/bookings/${checkout.bookingId}/confirmation\\?receiptToken=[A-Za-z0-9_-]{43}$`))
         });
         expect((fakeStripe.lastRequest as { expiresAt: Date }).expiresAt.getTime() - Date.now()).toBeGreaterThan(30 * 60 * 1000);
         const booking = await prisma.booking.findUniqueOrThrow({ where: { id: checkout.bookingId } });
@@ -350,6 +366,8 @@ describe("dashboard and public API contracts", () => {
           paymentExpectedAmountCents: quote.quote.totalCents,
           paymentExpectedCurrency: "usd"
         });
+        const receiptToken = new URL(checkout.confirmationUrl).searchParams.get("receiptToken");
+        expect(booking.receiptTokenHash).toBe(createHash("sha256").update(receiptToken ?? "").digest("hex"));
       } finally {
         await cleanupBooking(checkout.bookingId);
         await prisma.bookingHold.deleteMany({ where: { id: quote.holdId } });
@@ -447,6 +465,32 @@ describe("dashboard and public API contracts", () => {
       expect(await prisma.paymentEvent.count({ where: { bookingId: booking.id } })).toBe(0);
     } finally {
       await cleanupBooking(booking.id);
+    }
+  });
+
+  it("fails closed for legacy confirmed bookings without receipt tokens", async () => {
+    const legacy = await createPendingBooking("legacy-confirmation-token@example.com");
+    try {
+      await prisma.booking.update({
+        where: { id: legacy.id },
+        data: { status: "confirmed", paymentStatus: "paid", receiptTokenHash: null }
+      });
+      await expect(publicApi.confirmation(legacy.id, "A".repeat(43))).rejects.toThrow("Confirmed booking not found");
+    } finally {
+      await cleanupBooking(legacy.id);
+    }
+  });
+
+  it("hides tokenized confirmations after the operator business is suspended", async () => {
+    const fixture = await createConfirmedReceiptFixture("suspended-business-confirmation@example.com");
+    const receiptToken = "B".repeat(43);
+    try {
+      await expect(publicApi.confirmation(fixture.bookingId, receiptToken)).resolves.toMatchObject({ id: fixture.bookingId, status: "confirmed" });
+
+      await prisma.business.update({ where: { id: fixture.businessId }, data: { status: "suspended" } });
+      await expect(publicApi.confirmation(fixture.bookingId, receiptToken)).rejects.toThrow("Confirmed booking not found");
+    } finally {
+      await cleanupReceiptFixture(fixture);
     }
   });
 
@@ -643,10 +687,72 @@ describe("dashboard and public API contracts", () => {
     });
   }
 
+  async function createConfirmedReceiptFixture(customerEmail: string) {
+    const businessId = prefixedId("biz");
+    const listingId = prefixedId("lst");
+    const bookingId = prefixedId("bok");
+    const receiptToken = "B".repeat(43);
+    await prisma.business.create({
+      data: {
+        id: businessId,
+        name: "Receipt Fixture Tours",
+        slug: `receipt-fixture-${businessId}`,
+        status: "active",
+        timezone: "America/Denver",
+        currency: "USD"
+      }
+    });
+    await prisma.listing.create({
+      data: {
+        id: listingId,
+        businessId,
+        title: "Receipt Fixture Tour",
+        description: "Receipt token fixture",
+        category: "Tour",
+        status: "active",
+        basePriceCents: 6500,
+        durationMinutes: 60,
+        minGuests: 1,
+        maxGuests: 6,
+        capacity: 6,
+        imageUrlsJson: "[]"
+      }
+    });
+    await prisma.booking.create({
+      data: {
+        id: bookingId,
+        businessId,
+        listingId,
+        customerName: "Receipt Tester",
+        customerEmail,
+        bookingDate: dateAfterDays(16),
+        startTime: "11:00 AM",
+        endTime: "12:00 PM",
+        guestCount: 1,
+        adultCount: 1,
+        childCount: 0,
+        status: "confirmed",
+        paymentStatus: "paid",
+        receiptTokenHash: createHash("sha256").update(receiptToken).digest("hex"),
+        subtotalCents: 6500,
+        taxCents: 553,
+        platformFeeCents: 390,
+        totalCents: 7443
+      }
+    });
+    return { businessId, listingId, bookingId };
+  }
+
   async function cleanupBooking(bookingId: string) {
     await prisma.paymentEvent.deleteMany({ where: { bookingId } });
     await prisma.auditLog.deleteMany({ where: { entityId: bookingId } });
     await prisma.booking.deleteMany({ where: { id: bookingId } });
+  }
+
+  async function cleanupReceiptFixture(fixture: { businessId: string; listingId: string; bookingId: string }) {
+    await cleanupBooking(fixture.bookingId);
+    await prisma.listing.deleteMany({ where: { id: fixture.listingId } });
+    await prisma.business.deleteMany({ where: { id: fixture.businessId } });
   }
 
   async function withEnv<T>(values: Record<string, string | undefined>, callback: () => Promise<T>) {

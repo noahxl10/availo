@@ -232,6 +232,7 @@ model Booking {
   paymentExpectedAmountCents Int?          @map("payment_expected_amount_cents")
   paymentExpectedCurrency    String?       @map("payment_expected_currency")
   paymentExpiresAt           DateTime?     @map("payment_expires_at")
+  receiptTokenHash           String?       @unique @map("receipt_token_hash")
   subtotalCents              Int           @map("subtotal_cents")
   taxCents                   Int           @map("tax_cents")
   platformFeeCents           Int           @map("platform_fee_cents")

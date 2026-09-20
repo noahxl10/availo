@@ -148,12 +148,13 @@ describe("authenticated operator listing management", () => {
         expect(publicPayload.listings.map((listing) => listing.id)).not.toContain(draft.id);
 
         await expect(fetch(`${baseUrl}/public/listings/${draft.id}`)).resolves.toMatchObject({ status: 404 });
-        await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=2026-09-15`)).resolves.toMatchObject({ status: 404 });
+        const futureDate = dateAfterDays(14);
+        await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=${futureDate}`)).resolves.toMatchObject({ status: 404 });
         await expect(
           fetch(`${baseUrl}/public/bookings/quote`, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ listingId: draft.id, date: "2026-09-15", startTime: "9:30 AM", adults: 1, children: 0, addOns: [] })
+            body: JSON.stringify({ listingId: draft.id, date: futureDate, startTime: "9:30 AM", adults: 1, children: 0, addOns: [] })
           })
         ).resolves.toMatchObject({ status: 404 });
         await expect(prisma.auditLog.findFirst({ where: { businessId: fixture.businessId, userId: fixture.userId, entityId: draft.id, action: "listing.created" } })).resolves.toBeTruthy();
@@ -333,5 +334,11 @@ describe("authenticated operator listing management", () => {
         else process.env[key] = value;
       }
     }
+  }
+
+  function dateAfterDays(days: number) {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
   }
 });
