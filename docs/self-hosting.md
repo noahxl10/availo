@@ -35,6 +35,8 @@ The dashboard will be available at `http://localhost:3000` and the API at `http:
 
 After seeding, the dashboard can show the demo operator data served by the API after operator sign-in. If the dashboard cannot authenticate, coordinate a secure browser session, or reach `NEXT_PUBLIC_API_BASE_URL`, it displays an explicit status instead of substituting mock data; fix the API URL, browser support, CORS origin, or API process before treating the install as working.
 
+For service managers and reverse proxies, use `GET /healthz` as a process liveness probe and `GET /readyz` as a readiness probe. The readiness endpoint checks that Prisma can query the configured database and returns `503` with a generic `database_unavailable` body when the database is unreachable; it does not expose tenant, schema, SQL, or filesystem details.
+
 ## Configuration
 
 API variables live in `apps/api/.env`.

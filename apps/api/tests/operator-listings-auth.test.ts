@@ -147,13 +147,14 @@ describe("authenticated operator listing management", () => {
         const publicPayload = (await publicBusinessListings.json()) as { listings: { id: string }[] };
         expect(publicPayload.listings.map((listing) => listing.id)).not.toContain(draft.id);
 
+        const quoteDate = futureQuoteDate();
         await expect(fetch(`${baseUrl}/public/listings/${draft.id}`)).resolves.toMatchObject({ status: 404 });
-        await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=2026-09-15`)).resolves.toMatchObject({ status: 404 });
+        await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=${quoteDate}`)).resolves.toMatchObject({ status: 404 });
         await expect(
           fetch(`${baseUrl}/public/bookings/quote`, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ listingId: draft.id, date: "2026-09-15", startTime: "9:30 AM", adults: 1, children: 0, addOns: [] })
+            body: JSON.stringify({ listingId: draft.id, date: quoteDate, startTime: "9:30 AM", adults: 1, children: 0, addOns: [] })
           })
         ).resolves.toMatchObject({ status: 404 });
         await expect(prisma.auditLog.findFirst({ where: { businessId: fixture.businessId, userId: fixture.userId, entityId: draft.id, action: "listing.created" } })).resolves.toBeTruthy();
@@ -303,6 +304,12 @@ describe("authenticated operator listing management", () => {
       capacity: 8,
       status: "active"
     };
+  }
+
+  function futureQuoteDate() {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() + 14);
+    return date.toISOString().slice(0, 10);
   }
 
   async function cleanupListingFixture(businessId: string) {
