@@ -7,6 +7,8 @@ export type AuthenticatedActor = {
   businessId: string;
   role: string;
   sessionId: string;
+  authMethod?: "session" | "api_key";
+  apiKeyId?: string;
 };
 
 export type ActorRequest = {
@@ -34,17 +36,17 @@ export function jwtAccessSecret() {
 }
 
 export function parseBearerActor(authorization: string | undefined): AuthenticatedActor {
-  const token = bearerToken(authorization);
+  const token = bearerCredential(authorization);
   const secret = jwtAccessSecret();
   try {
     const claims = accessTokenClaims.parse(jwt.verify(token, secret));
-    return { userId: claims.sub, businessId: claims.businessId, role: claims.role, sessionId: claims.sid };
+    return { userId: claims.sub, businessId: claims.businessId, role: claims.role, sessionId: claims.sid, authMethod: "session" };
   } catch {
     throw new UnauthorizedException("Invalid access token");
   }
 }
 
-function bearerToken(authorization: string | undefined) {
+export function bearerCredential(authorization: string | undefined) {
   const match = /^Bearer\s+(.+)$/i.exec(authorization ?? "");
   if (!match) throw new UnauthorizedException("Authentication required");
   return match[1]?.trim() ?? "";

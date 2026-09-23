@@ -147,14 +147,14 @@ describe("authenticated operator listing management", () => {
         const publicPayload = (await publicBusinessListings.json()) as { listings: { id: string }[] };
         expect(publicPayload.listings.map((listing) => listing.id)).not.toContain(draft.id);
 
-        const quoteDate = futureQuoteDate();
+        const futureDate = dateDaysFromNow(7);
         await expect(fetch(`${baseUrl}/public/listings/${draft.id}`)).resolves.toMatchObject({ status: 404 });
-        await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=${quoteDate}`)).resolves.toMatchObject({ status: 404 });
+        await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=${futureDate}`)).resolves.toMatchObject({ status: 404 });
         await expect(
           fetch(`${baseUrl}/public/bookings/quote`, {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ listingId: draft.id, date: quoteDate, startTime: "9:30 AM", adults: 1, children: 0, addOns: [] })
+            body: JSON.stringify({ listingId: draft.id, date: futureDate, startTime: "9:30 AM", adults: 1, children: 0, addOns: [] })
           })
         ).resolves.toMatchObject({ status: 404 });
         await expect(prisma.auditLog.findFirst({ where: { businessId: fixture.businessId, userId: fixture.userId, entityId: draft.id, action: "listing.created" } })).resolves.toBeTruthy();
@@ -306,12 +306,6 @@ describe("authenticated operator listing management", () => {
     };
   }
 
-  function futureQuoteDate() {
-    const date = new Date();
-    date.setUTCDate(date.getUTCDate() + 14);
-    return date.toISOString().slice(0, 10);
-  }
-
   async function cleanupListingFixture(businessId: string) {
     const bookings = await prisma.booking.findMany({ where: { businessId }, select: { id: true } });
     const bookingIds = bookings.map((booking) => booking.id);
@@ -327,6 +321,12 @@ describe("authenticated operator listing management", () => {
     await prisma.session.deleteMany({ where: { businessId } });
     await prisma.user.deleteMany({ where: { businessId } });
     await prisma.business.deleteMany({ where: { id: businessId } });
+  }
+
+  function dateDaysFromNow(days: number) {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
   }
 
   async function withEnv<T>(values: Record<string, string>, callback: () => Promise<T>) {

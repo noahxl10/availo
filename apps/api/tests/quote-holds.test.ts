@@ -146,6 +146,87 @@ describe("quote hold capacity lifecycle", () => {
     });
   });
 
+  it("does not expose, quote, or checkout listings for inactive businesses", async () => {
+    const business = await prisma.business.create({
+      data: {
+        id: prefixedId("biz"),
+        name: "Suspended public booking fixture",
+        slug: `suspended-public-${prefixedId("biz").replaceAll("_", "-")}`,
+        status: "suspended",
+        timezone: "America/Denver",
+        currency: "USD"
+      }
+    });
+    const fixture = await createListingFixture({ capacity: 4, businessId: business.id });
+    const quote = {
+      listingId: fixture.listingId,
+      bookingDate: fixture.date,
+      startTime: fixture.startTime,
+      guestCount: 2,
+      adultCount: 2,
+      childCount: 0,
+      subtotalCents: 10000,
+      taxCents: 0,
+      platformFeeCents: 600,
+      processorFeeCents: 0,
+      totalCents: 10600,
+      addOns: []
+    };
+    const hold = await prisma.bookingHold.create({
+      data: {
+        id: prefixedId("hold"),
+        businessId: business.id,
+        listingId: fixture.listingId,
+        bookingDate: fixture.date,
+        startTime: fixture.startTime,
+        guestCount: 2,
+        quoteJson: JSON.stringify(quote),
+        expiresAt: new Date(Date.now() + 60_000)
+      }
+    });
+    const confirmedBooking = await prisma.booking.create({
+      data: {
+        id: prefixedId("bok"),
+        businessId: business.id,
+        listingId: fixture.listingId,
+        customerName: "Suspended Customer",
+        customerEmail: "suspended-confirmation@example.invalid",
+        bookingDate: fixture.date,
+        startTime: fixture.startTime,
+        endTime: "10:00 AM",
+        guestCount: 2,
+        adultCount: 2,
+        childCount: 0,
+        status: "confirmed",
+        paymentStatus: "paid",
+        paymentProvider: "mock",
+        paymentReferenceId: `mock_${prefixedId("pay")}`,
+        subtotalCents: 10000,
+        taxCents: 0,
+        platformFeeCents: 600,
+        totalCents: 10600
+      }
+    });
+
+    await withEnv({ ALLOW_MOCK_PAYMENTS: "true", STRIPE_SECRET_KEY: undefined }, async () => {
+      try {
+        await expect(publicApi.businessListings(business.slug)).rejects.toThrow("Business not found");
+        await expect(publicApi.listing(fixture.listingId)).rejects.toThrow("Listing not found");
+        await expect(publicApi.availability(fixture.listingId, fixture.date)).rejects.toThrow("Listing not found");
+        await expect(publicApi.quote(quoteBody(fixture))).rejects.toThrow("Listing not found");
+        await expect(publicApi.checkout(checkoutBody(fixture, hold.id))).rejects.toThrow("Listing not found");
+        await expect(publicApi.confirmation(confirmedBooking.id)).rejects.toThrow("Confirmed booking not found");
+
+        expect(await prisma.bookingHold.count({ where: { id: hold.id } })).toBe(1);
+        expect(await prisma.booking.count({ where: { listingId: fixture.listingId } })).toBe(1);
+        expect(await prisma.auditLog.count({ where: { businessId: business.id, action: "booking.checkout_started" } })).toBe(0);
+      } finally {
+        await cleanupListingFixture(fixture.listingId);
+        await prisma.business.deleteMany({ where: { id: business.id } });
+      }
+    });
+  });
+
   it("rate limits public quote creation before creating another hold", async () => {
     const fixture = await createListingFixture({ capacity: 8 });
 
@@ -447,13 +528,13 @@ describe("quote hold capacity lifecycle", () => {
     });
   });
 
-  async function createListingFixture({ capacity, date = dateAfterDays(30) }: { capacity: number; date?: string }) {
+  async function createListingFixture({ capacity, date = dateAfterDays(30), businessId = DEMO_BUSINESS_ID }: { capacity: number; date?: string; businessId?: string }) {
     const listingId = prefixedId("lst");
     const startTime = "9:00 AM";
     await prisma.listing.create({
       data: {
         id: listingId,
-        businessId: DEMO_BUSINESS_ID,
+        businessId,
         title: `Capacity fixture ${listingId}`,
         description: "Capacity fixture",
         category: "Tour",
@@ -471,7 +552,7 @@ describe("quote hold capacity lifecycle", () => {
     await prisma.availabilityRule.create({
       data: {
         id: prefixedId("av"),
-        businessId: DEMO_BUSINESS_ID,
+        businessId,
         listingId,
         dayOfWeek: new Date(`${date}T12:00:00`).getDay(),
         startTime,

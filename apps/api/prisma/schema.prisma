@@ -72,6 +72,7 @@ model User {
   business  Business? @relation(fields: [businessId], references: [id])
   sessions  Session[]
   auditLogs AuditLog[]
+  operatorApiKeys OperatorApiKey[]
 
   @@unique([businessId, email])
   @@unique([businessId, phoneNumber])
@@ -96,6 +97,7 @@ model Business {
 
   users        User[]
   sessions     Session[]
+  operatorApiKeys OperatorApiKey[]
   listings     Listing[]
   bookings     Booking[]
   bookingHolds BookingHold[]
@@ -120,6 +122,24 @@ model Session {
   @@index([businessId])
   @@index([userId])
   @@map("sessions")
+}
+
+model OperatorApiKey {
+  id              String    @id
+  businessId      String    @map("business_id")
+  createdByUserId String    @map("created_by_user_id")
+  name            String
+  prefix          String    @unique
+  secretHash      String    @map("secret_hash")
+  lastUsedAt      DateTime? @map("last_used_at")
+  revokedAt       DateTime? @map("revoked_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  business      Business @relation(fields: [businessId], references: [id])
+  createdByUser User     @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([businessId, revokedAt])
+  @@map("operator_api_keys")
 }
 
 model Listing {

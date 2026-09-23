@@ -1,13 +1,23 @@
 import { CanActivate, ExecutionContext, Inject, Injectable, UnauthorizedException } from "@nestjs/common";
-import { parseBearerActor, type ActorRequest } from "./auth-context.js";
+import { bearerCredential, parseBearerActor, type ActorRequest } from "./auth-context.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { OperatorApiKeyService } from "../operator-api-keys/operator-api-key.service.js";
 
 @Injectable()
 export class OperatorAuthGuard implements CanActivate {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(OperatorApiKeyService) private readonly apiKeys: OperatorApiKeyService
+  ) {}
 
   async canActivate(context: ExecutionContext) {
     const request = context.switchToHttp().getRequest<ActorRequest>();
+    const credential = bearerCredential(request.headers.authorization);
+    if (this.apiKeys.isOperatorApiKeyCredential(credential)) {
+      request.actor = await this.apiKeys.authenticate(credential);
+      return true;
+    }
+
     const actor = parseBearerActor(request.headers.authorization);
     const session = await this.prisma.session.findUnique({
       where: { id: actor.sessionId },

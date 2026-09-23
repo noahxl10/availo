@@ -35,6 +35,8 @@ The dashboard will be available at `http://localhost:3000` and the API at `http:
 
 After seeding, the dashboard can show the demo operator data served by the API after operator sign-in. If the dashboard cannot authenticate, coordinate a secure browser session, or reach `NEXT_PUBLIC_API_BASE_URL`, it displays an explicit status instead of substituting mock data; fix the API URL, browser support, CORS origin, or API process before treating the install as working.
 
+`npm run db:seed` is a destructive demo reset, not a production bootstrap or upgrade step. It deletes existing booking, payment event, hold, audit log, listing, user, and business rows before loading fixtures. The seed command allows the default local `file:./dev.db` database and refuses production-like configuration, including production mode, live Stripe keys, non-local public URLs, any non-default database URL, and remote databases, unless you set both `AVAILO_ALLOW_DESTRUCTIVE_SEED=true` and `AVAILO_DESTRUCTIVE_SEED_CONFIRM=reset-demo-data`.
+
 For service managers and reverse proxies, use `GET /healthz` as a process liveness probe and `GET /readyz` as a readiness probe. The readiness endpoint checks that Prisma can query the configured database and returns `503` with a generic `database_unavailable` body when the database is unreachable; it does not expose tenant, schema, SQL, or filesystem details.
 
 ## Configuration
@@ -43,7 +45,7 @@ API variables live in `apps/api/.env`.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | Yes | Prisma database URL. Defaults to `file:./dev.db` for SQLite. |
+| `DATABASE_URL` | Yes | Prisma database URL. Defaults to `file:./dev.db` for local SQLite demos; production SQLite installs must use an absolute persistent path such as `file:/var/lib/availo/prod.db`. |
 | `JWT_ACCESS_SECRET` | Yes | Secret used to sign short-lived access tokens. Use a long random value. |
 | `APP_BASE_URL` | Yes | Public dashboard URL. Also used as the default CORS origin. |
 | `API_BASE_URL` | Yes | Public API URL used for generated checkout links. |
@@ -103,13 +105,15 @@ Seeded installs include the demo owner user for local evaluation. Operator email
 
 Access tokens are bound to their issuing session, so logout, refresh rotation, refresh-token reuse, or session expiry invalidates protected operator API access for that token. Refresh tokens are opaque database-backed credentials in the form `v1.<sessionId>.<secret>`. Only the secret portion is hashed in the `Session` row. Refresh rotates the named session once; reuse of a rotated token revokes active sessions for that operator and business and requires a fresh login. Logout revokes the named session.
 
+For reporting jobs or small integrations that should not hold a browser session, owner and admin operators can issue read-only API keys. The full `avlo_...` key is shown once; Availo stores only a SHA-256 hash and the short prefix displayed in key lists. Revoke unused keys from `DELETE /operator-api-keys/:id` and rotate any key that may have left your control. API keys are intentionally viewer-scoped: they can read the authenticated tenant's business, dashboard, listings, and bookings, but they cannot mutate listings, settings, payments, capacity, or booking state. Key create/revoke actions are audited with the non-secret prefix, and successful key use updates `lastUsedAt` for rotation reviews.
+
 Non-browser API clients continue to use `POST /auth/email/login`, `POST /auth/refresh`, and `POST /auth/logout` with the refresh token in JSON. Browser dashboards use `POST /auth/browser/login`, `/auth/browser/refresh`, and `/auth/browser/logout` instead. These endpoints require an `Origin` exactly matching `CORS_ORIGINS` (or `APP_BASE_URL` when `CORS_ORIGINS` is unset); local development accepts `http://localhost:<port>` and `http://127.0.0.1:<port>` like the CORS default. The browser endpoints put only the opaque refresh token in a host-only `HttpOnly`, `SameSite=Lax` cookie scoped to `/auth/browser`, return the short-lived access token with `Cache-Control: no-store`, and never serialize the refresh token. Browser refresh preserves the same one-time rotation and replay revocation as JSON refresh, so the dashboard uses `navigator.locks` and `BroadcastChannel` to keep refresh single-flight across tabs. Browsers without those coordination APIs fail closed to sign-in instead of risking refresh replay. The cookie is `Secure` in production and when the request is HTTPS. Serve the API and dashboard behind HTTPS in production.
 
-`npm run config:check -- --production` validates the API and dashboard environment files before deployment. It fails when required URLs or secrets are missing, JWT secrets still use example values, production public URLs point at localhost, `CORS_ORIGINS` is wildcarded or missing the dashboard origin, or Stripe is only partially configured. The checker reads `apps/api/.env` and `apps/dashboard/.env.local` by default, then lets real process environment variables override file values so service-manager secrets win. Use `--api-env=path/to/.env` and `--dashboard-env=path/to/.env.local` if your service manager keeps environment files outside the default paths.
+`npm run config:check -- --production` validates the API and dashboard environment files before deployment. It fails when required URLs or secrets are missing, JWT secrets still use example values, production public URLs point at localhost, production SQLite uses a relative database path such as `file:./dev.db`, `CORS_ORIGINS` is wildcarded or missing the dashboard origin, or Stripe is only partially configured. The checker reads `apps/api/.env` and `apps/dashboard/.env.local` by default, then lets real process environment variables override file values so service-manager secrets win. Use `--api-env=path/to/.env` and `--dashboard-env=path/to/.env.local` if your service manager keeps environment files outside the default paths.
 
 ## Database notes
 
-SQLite is the current default and works well for evaluation and small installs. Keep the `apps/api/prisma/dev.db` file on persistent storage and back it up before pulling updates.
+SQLite is the current default and works well for evaluation and small installs. Local demos can use `file:./dev.db`, but production installs should point `DATABASE_URL` at an absolute path on persistent backed-up storage, for example `file:/var/lib/availo/prod.db`.
 
 The Prisma schema is in `apps/api/prisma/schema.prisma`. If you switch providers, update the datasource and create new migrations before deploying.
 
@@ -133,4 +137,4 @@ npm run db:migrate
 npm run build
 ```
 
-Restart the API and dashboard services after a successful build.
+Restart the API and dashboard services after a successful build. Do not run `npm run db:seed` during upgrades unless you intend to wipe and reload demo data.

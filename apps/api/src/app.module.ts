@@ -11,6 +11,8 @@ import { ListingController } from "./listings/listing.controller.js";
 import { ListingService } from "./listings/listing.service.js";
 import { BookingController } from "./bookings/booking.controller.js";
 import { BookingService } from "./bookings/booking.service.js";
+import { OperatorApiKeyController } from "./operator-api-keys/operator-api-key.controller.js";
+import { OperatorApiKeyService } from "./operator-api-keys/operator-api-key.service.js";
 import { PublicController } from "./public/public.controller.js";
 import { PublicService } from "./public/public.service.js";
 import { PaymentController } from "./payments/payment.controller.js";
@@ -19,12 +21,13 @@ import { PrismaService } from "./prisma/prisma.service.js";
 import { PublicCheckoutRateLimiter, PublicQuoteRateLimiter } from "./public/public-rate-limit.js";
 
 @Module({
-  controllers: [HealthController, AuthController, BusinessController, DashboardController, ListingController, BookingController, PublicController, PaymentController],
+  controllers: [HealthController, AuthController, BusinessController, DashboardController, ListingController, BookingController, OperatorApiKeyController, PublicController, PaymentController],
   providers: [
     PrismaService,
     DashboardService,
     ListingService,
     BookingService,
+    OperatorApiKeyService,
     PublicService,
     PublicQuoteRateLimiter,
     PublicCheckoutRateLimiter,
