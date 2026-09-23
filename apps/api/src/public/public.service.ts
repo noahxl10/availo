@@ -53,7 +53,7 @@ export class PublicService {
   ) {}
 
   async businessListings(slug: string) {
-    const business = await this.prisma.business.findUnique({ where: { slug } });
+    const business = await this.prisma.business.findFirst({ where: { slug, status: "active" } });
     if (!business) throw new NotFoundException("Business not found");
     const listings = await this.prisma.listing.findMany({
       where: { businessId: business.id, status: "active" },
@@ -65,7 +65,7 @@ export class PublicService {
 
   async listing(id: string) {
     const listing = await this.prisma.listing.findFirst({
-      where: { id, status: "active" },
+      where: { id, status: "active", business: { is: { status: "active" } } },
       include: { business: true, addOns: { where: { status: "active" } } }
     });
     if (!listing) throw new NotFoundException("Listing not found");
@@ -86,7 +86,7 @@ export class PublicService {
   async availability(id: string, date: string) {
     const now = new Date();
     const listing = await this.prisma.listing.findFirst({
-      where: { id, status: "active" },
+      where: { id, status: "active", business: { is: { status: "active" } } },
       include: {
         rules: true,
         exceptions: true,
@@ -109,7 +109,7 @@ export class PublicService {
       this.prisma.$transaction(async (tx) => {
         const now = new Date();
         const listing = await tx.listing.findFirst({
-          where: { id: input.listingId, status: "active" },
+          where: { id: input.listingId, status: "active", business: { is: { status: "active" } } },
           include: { business: true, addOns: { where: { status: "active" } }, rules: true, exceptions: true }
         });
         if (!listing) throw new NotFoundException("Listing not found");
@@ -166,10 +166,11 @@ export class PublicService {
         if (!holdMatchesInput(quote, input)) {
           throw new BadRequestException("Checkout input does not match the quoted hold");
         }
-        const listing = await tx.listing.findFirstOrThrow({
-          where: { id: hold.listingId, status: "active" },
+        const listing = await tx.listing.findFirst({
+          where: { id: hold.listingId, status: "active", business: { is: { status: "active" } } },
           include: { business: true, rules: true, exceptions: true }
         });
+        if (!listing) throw new NotFoundException("Listing not found");
         const deletedHold = await tx.bookingHold.deleteMany({ where: { id: hold.id, expiresAt: { gt: now } } });
         if (deletedHold.count !== 1) throw new BadRequestException("Hold is invalid or expired");
 
@@ -282,7 +283,10 @@ export class PublicService {
   }
 
   async confirmation(id: string) {
-    const booking = await this.prisma.booking.findFirst({ where: { id, status: "confirmed" }, include: { listing: true } });
+    const booking = await this.prisma.booking.findFirst({
+      where: { id, status: "confirmed", listing: { business: { is: { status: "active" } } } },
+      include: { listing: true }
+    });
     if (!booking) throw new NotFoundException("Confirmed booking not found");
     return { id: booking.id, status: booking.status, listing: booking.listing.title, totalCents: booking.totalCents };
   }
