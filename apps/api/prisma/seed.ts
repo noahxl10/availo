@@ -19,6 +19,7 @@ async function main(prisma: PrismaClient) {
   await prisma.availabilityRule.deleteMany();
   await prisma.listing.deleteMany();
   await prisma.session.deleteMany();
+  await prisma.operatorApiKey.deleteMany();
   await prisma.user.deleteMany();
   await prisma.business.deleteMany();
 
