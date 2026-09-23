@@ -65,7 +65,7 @@ See [docs/self-hosting.md](docs/self-hosting.md) for production-oriented setup n
 
 For a public install, set at least:
 
-- `apps/api/.env`: `APP_BASE_URL`, `API_BASE_URL`, `CORS_ORIGINS`, `JWT_ACCESS_SECRET`, and `DATABASE_URL`.
+- `apps/api/.env`: `APP_BASE_URL`, `API_BASE_URL`, `CORS_ORIGINS`, `JWT_ACCESS_SECRET`, and `DATABASE_URL` with a persistent production path such as `file:/var/lib/availo/prod.db`.
 - `apps/dashboard/.env.local`: `NEXT_PUBLIC_API_BASE_URL`.
 
 Run the production build with:
