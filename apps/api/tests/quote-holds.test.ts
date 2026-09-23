@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AddressInfo } from "node:net";
 import { NestFactory } from "@nestjs/core";
@@ -184,6 +185,8 @@ describe("quote hold capacity lifecycle", () => {
         expiresAt: new Date(Date.now() + 60_000)
       }
     });
+    const receiptToken = "A".repeat(43);
+    const receiptTokenHash = createHash("sha256").update(receiptToken).digest("hex");
     const confirmedBooking = await prisma.booking.create({
       data: {
         id: prefixedId("bok"),
@@ -201,6 +204,7 @@ describe("quote hold capacity lifecycle", () => {
         paymentStatus: "paid",
         paymentProvider: "mock",
         paymentReferenceId: `mock_${prefixedId("pay")}`,
+        receiptTokenHash,
         subtotalCents: 10000,
         taxCents: 0,
         platformFeeCents: 600,
@@ -215,7 +219,7 @@ describe("quote hold capacity lifecycle", () => {
         await expect(publicApi.availability(fixture.listingId, fixture.date)).rejects.toThrow("Listing not found");
         await expect(publicApi.quote(quoteBody(fixture))).rejects.toThrow("Listing not found");
         await expect(publicApi.checkout(checkoutBody(fixture, hold.id))).rejects.toThrow("Listing not found");
-        await expect(publicApi.confirmation(confirmedBooking.id)).rejects.toThrow("Confirmed booking not found");
+        await expect(publicApi.confirmation(confirmedBooking.id, receiptToken)).rejects.toThrow("Confirmed booking not found");
 
         expect(await prisma.bookingHold.count({ where: { id: hold.id } })).toBe(1);
         expect(await prisma.booking.count({ where: { listingId: fixture.listingId } })).toBe(1);

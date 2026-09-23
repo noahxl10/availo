@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { BadRequestException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -44,6 +45,8 @@ const HOLD_TTL_MS = 15 * 60 * 1000;
 const STRIPE_CHECKOUT_TTL_MS = 31 * 60 * 1000;
 const CAPACITY_RETRY_LIMIT = 3;
 const DEFAULT_BOOKING_HORIZON_DAYS = 548;
+const RECEIPT_TOKEN_BYTES = 32;
+const receiptTokenInput = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 
 @Injectable()
 export class PublicService {
@@ -179,6 +182,7 @@ export class PublicService {
           throw new BadRequestException("Selected slot is unavailable");
         }
         const paymentExpiresAt = new Date(now.getTime() + paymentTtlMs(provider));
+        const receiptToken = generateReceiptToken();
         const created = await tx.booking.create({
           data: {
             id: prefixedId("bok"),
@@ -200,6 +204,7 @@ export class PublicService {
             paymentExpectedAmountCents: quote.totalCents,
             paymentExpectedCurrency: normalizedCurrency(listing.business.currency),
             paymentExpiresAt,
+            receiptTokenHash: hashReceiptToken(receiptToken),
             subtotalCents: quote.subtotalCents,
             taxCents: quote.taxCents,
             platformFeeCents: quote.platformFeeCents,
@@ -228,12 +233,19 @@ export class PublicService {
             entityId: created.id
           }
         });
-        return { ...created, listingTitle: listing.title };
+        return { ...created, listingTitle: listing.title, receiptToken };
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
     );
     const apiBaseUrl = process.env.API_BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
+    const confirmationUrl = `${apiBaseUrl}/public/bookings/${booking.id}/confirmation?receiptToken=${encodeURIComponent(booking.receiptToken)}`;
     if (provider === "mock") {
-      return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}` };
+      return {
+        bookingId: booking.id,
+        status: booking.status,
+        paymentExpiresAt: booking.paymentExpiresAt?.toISOString(),
+        checkoutUrl: `${apiBaseUrl}/payments/mock/${booking.id}`,
+        confirmationUrl
+      };
     }
 
     const appBaseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
@@ -246,7 +258,7 @@ export class PublicService {
         amountCents: booking.totalCents,
         currency: requiredPaymentCurrency(booking.paymentExpectedCurrency),
         expiresAt: requiredPaymentExpiry(booking.paymentExpiresAt),
-        successUrl: `${appBaseUrl}/bookings/${booking.id}/confirmation`,
+        successUrl: `${appBaseUrl}/bookings/${booking.id}/confirmation?receiptToken=${encodeURIComponent(booking.receiptToken)}`,
         cancelUrl: `${appBaseUrl}/`
       });
       const updated = await this.prisma.booking.updateMany({
@@ -265,7 +277,7 @@ export class PublicService {
         await this.recordCheckoutFailure(booking.businessId, booking.id, "booking_not_awaiting_payment");
         throw new ServiceUnavailableException("Stripe Checkout could not be attached to this booking");
       }
-      return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: session.url };
+      return { bookingId: booking.id, status: booking.status, paymentExpiresAt: booking.paymentExpiresAt?.toISOString(), checkoutUrl: session.url, confirmationUrl };
     } catch (error) {
       if (error instanceof ServiceUnavailableException) throw error;
       if (session) await this.expireCheckoutSession(session.id);
@@ -282,12 +294,19 @@ export class PublicService {
     }
   }
 
-  async confirmation(id: string) {
+  async confirmation(id: string, receiptToken: unknown) {
+    const parsedToken = receiptTokenInput.safeParse(receiptToken);
+    if (!parsedToken.success) throw new NotFoundException("Confirmed booking not found");
     const booking = await this.prisma.booking.findFirst({
-      where: { id, status: "confirmed", listing: { business: { is: { status: "active" } } } },
-      include: { listing: true }
+      where: {
+        id,
+        status: "confirmed",
+        receiptTokenHash: hashReceiptToken(parsedToken.data),
+        listing: { status: "active", business: { is: { status: "active" } } }
+      },
+      include: { listing: { include: { business: true } } }
     });
-    if (!booking) throw new NotFoundException("Confirmed booking not found");
+    if (!booking || booking.listing.status !== "active" || booking.listing.business.status !== "active") throw new NotFoundException("Confirmed booking not found");
     return { id: booking.id, status: booking.status, listing: booking.listing.title, totalCents: booking.totalCents };
   }
 
@@ -303,6 +322,14 @@ export class PublicService {
       }
     });
   }
+}
+
+function generateReceiptToken() {
+  return randomBytes(RECEIPT_TOKEN_BYTES).toString("base64url");
+}
+
+function hashReceiptToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
