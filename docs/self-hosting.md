@@ -37,6 +37,8 @@ After seeding, the dashboard can show the demo operator data served by the API a
 
 `npm run db:seed` is a destructive demo reset, not a production bootstrap or upgrade step. It deletes existing booking, payment event, hold, audit log, listing, user, and business rows before loading fixtures. The seed command allows the default local `file:./dev.db` database and refuses production-like configuration, including production mode, live Stripe keys, non-local public URLs, any non-default database URL, and remote databases, unless you set both `AVAILO_ALLOW_DESTRUCTIVE_SEED=true` and `AVAILO_DESTRUCTIVE_SEED_CONFIRM=reset-demo-data`.
 
+For service managers and reverse proxies, use `GET /healthz` as a process liveness probe and `GET /readyz` as a readiness probe. The readiness endpoint checks that Prisma can query the configured database and returns `503` with a generic `database_unavailable` body when the database is unreachable; it does not expose tenant, schema, SQL, or filesystem details.
+
 ## Configuration
 
 API variables live in `apps/api/.env`.

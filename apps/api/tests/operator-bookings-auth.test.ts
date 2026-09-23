@@ -5,6 +5,7 @@ import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { AppModule } from "../src/app.module.js";
 import { configureApiHttp } from "../src/api-http.js";
+import { BookingService } from "../src/bookings/booking.service.js";
 import { prefixedId } from "../src/common/ids.js";
 import { DEMO_BUSINESS_ID } from "../src/common/tenant.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
@@ -166,6 +167,204 @@ describe("authenticated operator booking reads", () => {
     }
   });
 
+  it("allows staff to cancel same-tenant unpaid pending bookings and records a minimal audit trail", async () => {
+    const fixture = await createBookingReadFixture("tenant-cancel", 0, "staff");
+    const bookingId = prefixedId("bok");
+    await createFixtureBooking(fixture.businessId, fixture.listingId, bookingId, new Date(), "tenant-cancel", {
+      status: "pending_payment",
+      paymentStatus: "pending",
+      paymentProvider: "mock",
+      paymentReferenceId: `mock_${bookingId}`,
+      paymentExpiresAt: new Date(Date.now() + 15 * 60_000)
+    });
+
+    try {
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+        const response = await cancelBooking(baseUrl, bookingId, await signToken(fixture.userId, fixture.businessId, "staff"));
+        expect(response.status).toBe(201);
+        const canceled = await response.json();
+
+        expect(canceled).toMatchObject({ id: bookingId, status: "canceled", paymentStatus: "failed" });
+        expect(JSON.stringify(canceled)).not.toContain("businessId");
+        expect(JSON.stringify(canceled)).not.toContain("paymentReferenceId");
+        expect(JSON.stringify(canceled)).not.toContain("paymentIntentId");
+        expect(JSON.stringify(canceled)).not.toContain("paymentExpiresAt");
+
+        await expect(
+          prisma.auditLog.findMany({
+            where: { businessId: fixture.businessId, userId: fixture.userId, entityId: bookingId },
+            select: { action: true, metadataJson: true }
+          })
+        ).resolves.toEqual([
+          {
+            action: "booking.canceled",
+            metadataJson: JSON.stringify({ previousStatus: "pending_payment", previousPaymentStatus: "pending" })
+          }
+        ]);
+        await expect(prisma.paymentEvent.count({ where: { bookingId } })).resolves.toBe(0);
+      });
+    } finally {
+      await cleanupBookingReadFixture(fixture.businessId);
+    }
+  });
+
+  it("keeps viewers read-only and hides cross-tenant cancellation attempts", async () => {
+    const viewerFixture = await createBookingReadFixture("tenant-cancel-viewer", 0, "viewer");
+    const ownerFixture = await createBookingReadFixture("tenant-cancel-owner", 0, "owner");
+    const hiddenFixture = await createBookingReadFixture("tenant-cancel-hidden", 0, "owner");
+    const viewerBookingId = prefixedId("bok");
+    const ownerBookingId = prefixedId("bok");
+    const hiddenBookingId = prefixedId("bok");
+    await createFixtureBooking(viewerFixture.businessId, viewerFixture.listingId, viewerBookingId, new Date(), "viewer-cancel", pendingBookingData(viewerBookingId));
+    await createFixtureBooking(ownerFixture.businessId, ownerFixture.listingId, ownerBookingId, new Date(), "owner-cancel", pendingBookingData(ownerBookingId));
+    await createFixtureBooking(hiddenFixture.businessId, hiddenFixture.listingId, hiddenBookingId, new Date(), "hidden-cancel", pendingBookingData(hiddenBookingId));
+
+    try {
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+        await expect(cancelBooking(baseUrl, viewerBookingId, await signToken(viewerFixture.userId, viewerFixture.businessId, "viewer"))).resolves.toMatchObject({ status: 403 });
+        await expect(cancelBooking(baseUrl, hiddenBookingId, await signToken(ownerFixture.userId, ownerFixture.businessId))).resolves.toMatchObject({ status: 404 });
+        await expect(cancelBooking(baseUrl, "bok_missing_cancel", await signToken(ownerFixture.userId, ownerFixture.businessId))).resolves.toMatchObject({ status: 404 });
+
+        await expect(prisma.booking.findUniqueOrThrow({ where: { id: viewerBookingId } })).resolves.toMatchObject({ status: "pending_payment", paymentStatus: "pending" });
+        await expect(prisma.booking.findUniqueOrThrow({ where: { id: hiddenBookingId } })).resolves.toMatchObject({ status: "pending_payment", paymentStatus: "pending" });
+      });
+    } finally {
+      await cleanupBookingReadFixture(hiddenFixture.businessId);
+      await cleanupBookingReadFixture(ownerFixture.businessId);
+      await cleanupBookingReadFixture(viewerFixture.businessId);
+    }
+  });
+
+  it("rejects cancellation for settled bookings without mutating state", async () => {
+    const fixture = await createBookingReadFixture("tenant-cancel-settled", 1);
+
+    try {
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+        const response = await cancelBooking(baseUrl, fixture.bookingIds[0]!, await signToken(fixture.userId, fixture.businessId));
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({ message: "Only unpaid pending bookings can be canceled" });
+        await expect(prisma.booking.findUniqueOrThrow({ where: { id: fixture.bookingIds[0]! } })).resolves.toMatchObject({ status: "confirmed", paymentStatus: "paid" });
+        await expect(prisma.auditLog.count({ where: { businessId: fixture.businessId, action: "booking.canceled" } })).resolves.toBe(0);
+      });
+    } finally {
+      await cleanupBookingReadFixture(fixture.businessId);
+    }
+  });
+
+  it("releases pending booking capacity and rejects late mock confirmation after cancellation", async () => {
+    const fixture = await createBookingReadFixture("tenant-cancel-capacity", 0);
+    const bookingId = prefixedId("bok");
+    const bookingDate = dateAfterDays(28);
+    await prisma.availabilityRule.create({
+      data: {
+        id: prefixedId("avr"),
+        businessId: fixture.businessId,
+        listingId: fixture.listingId,
+        dayOfWeek: new Date(`${bookingDate}T12:00:00`).getDay(),
+        startTime: "10:00 AM",
+        endTime: "11:00 AM",
+        slotIntervalMinutes: 60,
+        capacity: 2,
+        effectiveStartDate: bookingDate
+      }
+    });
+    await createFixtureBooking(fixture.businessId, fixture.listingId, bookingId, new Date(), "capacity-cancel", {
+      ...pendingBookingData(bookingId),
+      bookingDate,
+      startTime: "10:00 AM",
+      endTime: "10:45 AM",
+      guestCount: 2,
+      adultCount: 2
+    });
+
+    try {
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret, ALLOW_MOCK_PAYMENTS: "true" }, async (baseUrl) => {
+        const before = await fetch(`${baseUrl}/public/listings/${fixture.listingId}/availability?date=${bookingDate}`);
+        expect(before.status).toBe(200);
+        await expect(before.json()).resolves.toMatchObject({ slots: [expect.objectContaining({ startTime: "10:00 AM", capacityRemaining: 0 })] });
+
+        const canceled = await cancelBooking(baseUrl, bookingId, await signToken(fixture.userId, fixture.businessId));
+        expect(canceled.status).toBe(201);
+
+        const after = await fetch(`${baseUrl}/public/listings/${fixture.listingId}/availability?date=${bookingDate}`);
+        expect(after.status).toBe(200);
+        await expect(after.json()).resolves.toMatchObject({ slots: [expect.objectContaining({ startTime: "10:00 AM", capacityRemaining: 2 })] });
+
+        const latePayment = await fetch(`${baseUrl}/payments/mock/confirm`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ bookingId, providerEventId: "evt_late_canceled_mock" })
+        });
+        expect(latePayment.status).toBe(400);
+        await expect(prisma.booking.findUniqueOrThrow({ where: { id: bookingId } })).resolves.toMatchObject({ status: "canceled", paymentStatus: "failed" });
+        await expect(prisma.paymentEvent.count({ where: { bookingId } })).resolves.toBe(0);
+      });
+    } finally {
+      await cleanupBookingReadFixture(fixture.businessId);
+    }
+  });
+
+  it("expires Stripe Checkout before canceling a pending Stripe booking", async () => {
+    const fixture = await createBookingReadFixture("tenant-cancel-stripe", 0);
+    const bookingId = prefixedId("bok");
+    const sessionId = `cs_test_${bookingId}`;
+    await createFixtureBooking(fixture.businessId, fixture.listingId, bookingId, new Date(), "stripe-cancel", {
+      ...pendingBookingData(bookingId),
+      paymentProvider: "stripe",
+      paymentReferenceId: sessionId,
+      paymentIntentId: `pi_test_${bookingId}`,
+      paymentExpectedCurrency: "usd"
+    });
+    const expiredSessions: string[] = [];
+    const service = new BookingService(prisma, {
+      createCheckoutSession: async () => {
+        throw new Error("not used");
+      },
+      expireCheckoutSession: async (id: string) => {
+        expiredSessions.push(id);
+      }
+    });
+
+    try {
+      const response = await service.cancel({ userId: fixture.userId, businessId: fixture.businessId, role: "owner", sessionId: prefixedId("ses") }, bookingId);
+      expect(response).toMatchObject({ id: bookingId, status: "canceled", paymentStatus: "failed" });
+      expect(expiredSessions).toEqual([sessionId]);
+      await expect(prisma.auditLog.count({ where: { businessId: fixture.businessId, userId: fixture.userId, entityId: bookingId, action: "booking.canceled" } })).resolves.toBe(1);
+    } finally {
+      await cleanupBookingReadFixture(fixture.businessId);
+    }
+  });
+
+  it("fails closed without mutating when Stripe Checkout expiration fails", async () => {
+    const fixture = await createBookingReadFixture("tenant-cancel-stripe-fail", 0);
+    const bookingId = prefixedId("bok");
+    await createFixtureBooking(fixture.businessId, fixture.listingId, bookingId, new Date(), "stripe-cancel-fail", {
+      ...pendingBookingData(bookingId),
+      paymentProvider: "stripe",
+      paymentReferenceId: `cs_test_${bookingId}`,
+      paymentIntentId: `pi_test_${bookingId}`,
+      paymentExpectedCurrency: "usd"
+    });
+    const service = new BookingService(prisma, {
+      createCheckoutSession: async () => {
+        throw new Error("not used");
+      },
+      expireCheckoutSession: async () => {
+        throw new Error("stripe unavailable");
+      }
+    });
+
+    try {
+      await expect(service.cancel({ userId: fixture.userId, businessId: fixture.businessId, role: "owner", sessionId: prefixedId("ses") }, bookingId)).rejects.toThrow(
+        "Stripe Checkout session could not be expired"
+      );
+      await expect(prisma.booking.findUniqueOrThrow({ where: { id: bookingId } })).resolves.toMatchObject({ status: "pending_payment", paymentStatus: "pending" });
+      await expect(prisma.auditLog.count({ where: { businessId: fixture.businessId, action: "booking.canceled" } })).resolves.toBe(0);
+    } finally {
+      await cleanupBookingReadFixture(fixture.businessId);
+    }
+  });
+
   it("has an index for tenant-scoped booking pagination", async () => {
     const bookingIndexes = await prisma.$queryRaw<{ name: string }[]>`PRAGMA index_list("bookings")`;
     expect(bookingIndexes.map((index) => index.name)).toContain("bookings_business_id_created_at_id_idx");
@@ -193,15 +392,15 @@ describe("authenticated operator booking reads", () => {
     return fetch(`${baseUrl}/bookings/${id}`, { headers: { authorization: `Bearer ${accessToken}` } });
   }
 
-  async function signToken(userId: string, businessId: string) {
+  async function signToken(userId: string, businessId: string, role: "owner" | "admin" | "staff" | "viewer" = "owner") {
     const sessionId = prefixedId("ses");
     await prisma.session.create({
       data: { id: sessionId, userId, businessId, refreshTokenHash: "access-token-test-session", expiresAt: new Date(Date.now() + 60_000) }
     });
-    return jwt.sign({ sub: userId, businessId, role: "owner", sid: sessionId }, jwtSecret, { expiresIn: "15m" });
+    return jwt.sign({ sub: userId, businessId, role, sid: sessionId }, jwtSecret, { expiresIn: "15m" });
   }
 
-  async function createBookingReadFixture(slugSeed: string, bookingCount: number) {
+  async function createBookingReadFixture(slugSeed: string, bookingCount: number, role: "owner" | "admin" | "staff" | "viewer" = "owner") {
     const businessId = prefixedId("biz");
     const userId = prefixedId("usr");
     const listingId = prefixedId("lst");
@@ -217,7 +416,7 @@ describe("authenticated operator booking reads", () => {
         currency: "USD"
       }
     });
-    await prisma.user.create({ data: { id: userId, businessId, email: `${userId}@example.invalid`, role: "owner", status: "active" } });
+    await prisma.user.create({ data: { id: userId, businessId, email: `${userId}@example.invalid`, role, status: "active" } });
     await prisma.listing.create({
       data: {
         id: listingId,
@@ -245,7 +444,13 @@ describe("authenticated operator booking reads", () => {
     return { businessId, userId, listingId, bookingIds };
   }
 
-  function createFixtureBooking(businessId: string, listingId: string, id: string, createdAt: Date, customerSeed: string) {
+  function createFixtureBooking(businessId: string, listingId: string, id: string, createdAt: Date, customerSeed: string, overrides: Partial<FixtureBookingData> = {}) {
+    const bookingDate = overrides.bookingDate ?? dateAfterDays(21);
+    const startTime = overrides.startTime ?? "10:00 AM";
+    const endTime = overrides.endTime ?? "10:45 AM";
+    const guestCount = overrides.guestCount ?? 1;
+    const adultCount = overrides.adultCount ?? 1;
+    const childCount = overrides.childCount ?? 0;
     return prisma.booking.create({
       data: {
         id,
@@ -253,14 +458,20 @@ describe("authenticated operator booking reads", () => {
         listingId,
         customerName: `Customer ${customerSeed}`,
         customerEmail: `${customerSeed}@example.invalid`,
-        bookingDate: dateAfterDays(21),
-        startTime: "10:00 AM",
-        endTime: "10:45 AM",
-        guestCount: 1,
-        adultCount: 1,
-        childCount: 0,
-        status: "confirmed",
-        paymentStatus: "paid",
+        bookingDate,
+        startTime,
+        endTime,
+        guestCount,
+        adultCount,
+        childCount,
+        status: overrides.status ?? "confirmed",
+        paymentStatus: overrides.paymentStatus ?? "paid",
+        paymentProvider: overrides.paymentProvider ?? null,
+        paymentReferenceId: overrides.paymentReferenceId ?? null,
+        paymentIntentId: overrides.paymentIntentId ?? null,
+        paymentExpectedAmountCents: overrides.paymentExpectedAmountCents ?? null,
+        paymentExpectedCurrency: overrides.paymentExpectedCurrency ?? null,
+        paymentExpiresAt: overrides.paymentExpiresAt ?? null,
         subtotalCents: 3000,
         taxCents: 0,
         platformFeeCents: 180,
@@ -287,7 +498,23 @@ describe("authenticated operator booking reads", () => {
     await prisma.business.deleteMany({ where: { id: businessId } });
   }
 
-  async function withEnv<T>(values: Record<string, string>, callback: () => Promise<T>) {
+  function cancelBooking(baseUrl: string, id: string, accessToken: string) {
+    return fetch(`${baseUrl}/bookings/${id}/cancel`, { method: "POST", headers: { authorization: `Bearer ${accessToken}` } });
+  }
+
+  function pendingBookingData(bookingId: string): Partial<FixtureBookingData> {
+    return {
+      status: "pending_payment",
+      paymentStatus: "pending",
+      paymentProvider: "mock",
+      paymentReferenceId: `mock_${bookingId}`,
+      paymentExpectedAmountCents: 3180,
+      paymentExpectedCurrency: "usd",
+      paymentExpiresAt: new Date(Date.now() + 15 * 60_000)
+    };
+  }
+
+  async function withEnv<T>(values: Record<string, string | undefined>, callback: () => Promise<T>) {
     const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
     for (const [key, value] of Object.entries(values)) process.env[key] = value;
     try {
@@ -310,4 +537,21 @@ describe("authenticated operator booking reads", () => {
 type BookingPage = {
   items: { id: string }[];
   nextCursor: string | null;
+};
+
+type FixtureBookingData = {
+  bookingDate: string;
+  startTime: string;
+  endTime: string;
+  guestCount: number;
+  adultCount: number;
+  childCount: number;
+  status: "pending_payment" | "confirmed" | "canceled" | "refunded" | "partially_refunded" | "failed";
+  paymentStatus: "unpaid" | "pending" | "paid" | "failed" | "refunded" | "partially_refunded";
+  paymentProvider: string | null;
+  paymentReferenceId: string | null;
+  paymentIntentId: string | null;
+  paymentExpectedAmountCents: number | null;
+  paymentExpectedCurrency: string | null;
+  paymentExpiresAt: Date | null;
 };
