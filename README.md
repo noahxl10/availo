@@ -41,7 +41,7 @@ In another terminal:
 npm run dev
 ```
 
-Open `http://localhost:3000`. The API runs on `http://localhost:4000`.
+Open `http://localhost:3000`. The API runs on `http://localhost:4000`. `npm run db:seed` is a destructive demo reset; it is intended for local evaluation with the default `file:./dev.db` database and refuses production-like configuration unless explicitly acknowledged.
 
 For local checkout demos, set `ALLOW_MOCK_PAYMENTS="true"` in `apps/api/.env`. For real checkout, set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`; Availo confirms Stripe bookings only after a signed webhook matches the booking's stored provider IDs, amount, and currency. Keep mock payments false or unset outside local demo and test environments, and schedule expired-reservation cleanup so stale Stripe Checkout Sessions are closed.
 
@@ -51,9 +51,11 @@ Checkout responses include a public booking confirmation URL with a bearer-style
 
 ### First-run behavior
 
-The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. The dashboard reads `NEXT_PUBLIC_API_BASE_URL` and signs operators in with the browser session endpoints; if authentication or the API is unavailable, it shows an explicit status instead of substituting mock data. Email login is tenant-scoped and requires a business slug, email, and password for an active user in an active matching business. The demo-bound registration route is intentionally unavailable; use an explicit onboarding flow when one is implemented.
+The seeded install loads a demo operator account and sample tour data so contributors can inspect the dashboard and public booking flow immediately. Seeding deletes existing booking, payment event, hold, audit log, listing, user, and business rows before loading fixtures. It is not an upgrade step or production bootstrap. The dashboard reads `NEXT_PUBLIC_API_BASE_URL` and signs operators in with the browser session endpoints; if authentication or the API is unavailable, it shows an explicit status instead of substituting mock data. Email login is tenant-scoped and requires a business slug, email, and password for an active user in an active matching business. The demo-bound registration route is intentionally unavailable; use an explicit onboarding flow when one is implemented.
 
 Access tokens are bound to the session that issued them. Refresh tokens use the opaque `v1.<sessionId>.<secret>` form. They rotate once on `POST /auth/refresh`; reuse of a rotated token revokes active sessions for that operator and requires a fresh login. `POST /auth/logout` revokes the named session and invalidates its access token. These JSON endpoints retain their refresh-token response/body contract for non-browser API clients. Send the access token as a Bearer token to `GET /auth/me`, which returns only the authenticated actor's `userId`, `businessId`, and `role`.
+
+Owner and admin operators can create read-only API keys with `POST /operator-api-keys`, list key prefixes and usage metadata with `GET /operator-api-keys`, and revoke keys with `DELETE /operator-api-keys/:id`. Availo returns the full `avlo_...` key only once at creation time and stores only a SHA-256 hash plus its short lookup prefix. API keys authenticate as viewer actors for tenant-scoped read APIs such as `/business`, `/dashboard/overview`, `/listings`, and `/bookings`; they cannot create listings or update business settings. Key create/revoke actions write audit logs with the non-secret prefix, and successful API-key reads update `lastUsedAt`.
 
 Browser dashboards use `POST /auth/browser/login`, `/auth/browser/refresh`, and `/auth/browser/logout` from a configured dashboard origin. They keep the opaque refresh token in a host-only `HttpOnly`, `SameSite=Lax` cookie scoped to `/auth/browser`; only the short-lived access token is returned in JSON, with `Cache-Control: no-store`. Browser login and refresh never serialize the refresh token. The dashboard keeps access tokens in memory only and coordinates refresh with browser locks plus broadcast messages so refresh-token replay protection remains strict. Use HTTPS in production so the cookie is marked `Secure`.
 
@@ -67,7 +69,7 @@ See [docs/self-hosting.md](docs/self-hosting.md) for production-oriented setup n
 
 For a public install, set at least:
 
-- `apps/api/.env`: `APP_BASE_URL`, `API_BASE_URL`, `CORS_ORIGINS`, `JWT_ACCESS_SECRET`, and `DATABASE_URL`.
+- `apps/api/.env`: `APP_BASE_URL`, `API_BASE_URL`, `CORS_ORIGINS`, `JWT_ACCESS_SECRET`, and `DATABASE_URL` with a persistent production path such as `file:/var/lib/availo/prod.db`.
 - `apps/dashboard/.env.local`: `NEXT_PUBLIC_API_BASE_URL`.
 
 Run the production build with:
@@ -91,7 +93,7 @@ npm run start:dashboard
 | `npm run config:check` | Check self-host environment files; pass `-- --production` before deploying. |
 | `npm run db:generate` | Generate the Prisma client. |
 | `npm run db:migrate` | Apply local Prisma migrations. |
-| `npm run db:seed` | Load demo seed data. |
+| `npm run db:seed` | Destructively reset and load local demo seed data. |
 
 ## Project status
 

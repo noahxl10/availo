@@ -43,8 +43,69 @@ describe("production config checker", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("JWT_ACCESS_SECRET still uses the example value");
+    expect(result.stderr).toContain("DATABASE_URL must use an absolute SQLite file path in production");
     expect(result.stderr).toContain("APP_BASE_URL cannot point at a local or bind address");
     expect(result.stderr).toContain("CORS_ORIGINS cannot include '*'");
+  });
+
+  it.each(["file:./prod.db", "file:relative.db", "file://prod.db"])(
+    "blocks non-absolute SQLite database paths in production: %s",
+    (databaseUrl) => {
+      const result = runCheck({
+        apiEnv: {
+          DATABASE_URL: databaseUrl,
+          JWT_ACCESS_SECRET: "0123456789abcdef0123456789abcdef",
+          APP_BASE_URL: "https://book.example.com",
+          API_BASE_URL: "https://api.example.com",
+          CORS_ORIGINS: "https://book.example.com"
+        },
+        dashboardEnv: {
+          NEXT_PUBLIC_API_BASE_URL: "https://api.example.com"
+        }
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("DATABASE_URL must use an absolute SQLite file path in production");
+    }
+  );
+
+  it("allows absolute SQLite database paths in production", () => {
+    for (const databaseUrl of ["file:/var/lib/availo/prod.db", "file:///var/lib/availo/prod.db"]) {
+      const result = runCheck({
+        apiEnv: {
+          DATABASE_URL: databaseUrl,
+          JWT_ACCESS_SECRET: "0123456789abcdef0123456789abcdef",
+          APP_BASE_URL: "https://book.example.com",
+          API_BASE_URL: "https://api.example.com",
+          CORS_ORIGINS: "https://book.example.com"
+        },
+        dashboardEnv: {
+          NEXT_PUBLIC_API_BASE_URL: "https://api.example.com"
+        }
+      });
+
+      expect(result.status).toBe(0);
+    }
+  });
+
+  it("keeps relative SQLite paths as warnings outside production checks", () => {
+    const result = runCheck({
+      production: false,
+      apiEnv: {
+        DATABASE_URL: "file:./dev.db",
+        JWT_ACCESS_SECRET: "local-dev-access-secret",
+        APP_BASE_URL: "http://localhost:3000",
+        API_BASE_URL: "http://localhost:4000",
+        CORS_ORIGINS: "http://localhost:3000"
+      },
+      dashboardEnv: {
+        NEXT_PUBLIC_API_BASE_URL: "http://localhost:4000"
+      }
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Development configuration check passed.");
+    expect(result.stderr).toContain("DATABASE_URL must use an absolute SQLite file path in production");
   });
 
   it("lets process environment override env-file defaults", () => {
@@ -131,7 +192,7 @@ describe("production config checker", () => {
   });
 });
 
-function runCheck({ apiEnv, dashboardEnv, env = {} }) {
+function runCheck({ apiEnv, dashboardEnv, env = {}, production = true }) {
   const dir = mkdtempSync(join(tmpdir(), "availo-config-check-"));
   const apiPath = join(dir, "api.env");
   const dashboardPath = join(dir, "dashboard.env");
@@ -140,7 +201,12 @@ function runCheck({ apiEnv, dashboardEnv, env = {} }) {
 
   return spawnSync(
     process.execPath,
-    [scriptPath.pathname, "--production", `--api-env=${apiPath}`, `--dashboard-env=${dashboardPath}`],
+    [
+      scriptPath.pathname,
+      ...(production ? ["--production"] : []),
+      `--api-env=${apiPath}`,
+      `--dashboard-env=${dashboardPath}`
+    ],
     {
       encoding: "utf8",
       env: {

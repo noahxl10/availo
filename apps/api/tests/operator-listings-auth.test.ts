@@ -147,8 +147,8 @@ describe("authenticated operator listing management", () => {
         const publicPayload = (await publicBusinessListings.json()) as { listings: { id: string }[] };
         expect(publicPayload.listings.map((listing) => listing.id)).not.toContain(draft.id);
 
+        const futureDate = dateDaysFromNow(7);
         await expect(fetch(`${baseUrl}/public/listings/${draft.id}`)).resolves.toMatchObject({ status: 404 });
-        const futureDate = dateAfterDays(14);
         await expect(fetch(`${baseUrl}/public/listings/${draft.id}/availability?date=${futureDate}`)).resolves.toMatchObject({ status: 404 });
         await expect(
           fetch(`${baseUrl}/public/bookings/quote`, {
@@ -323,6 +323,12 @@ describe("authenticated operator listing management", () => {
     await prisma.business.deleteMany({ where: { id: businessId } });
   }
 
+  function dateDaysFromNow(days: number) {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+  }
+
   async function withEnv<T>(values: Record<string, string>, callback: () => Promise<T>) {
     const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
     for (const [key, value] of Object.entries(values)) process.env[key] = value;
@@ -334,11 +340,5 @@ describe("authenticated operator listing management", () => {
         else process.env[key] = value;
       }
     }
-  }
-
-  function dateAfterDays(days: number) {
-    const date = new Date();
-    date.setUTCDate(date.getUTCDate() + days);
-    return date.toISOString().slice(0, 10);
   }
 });

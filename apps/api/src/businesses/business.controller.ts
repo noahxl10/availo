@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Inject, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Inject, NotFoundException, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import { z } from "zod";
 import { CurrentActor, type AuthenticatedActor } from "../auth/auth-context.js";
 import { OperatorAuthGuard } from "../auth/operator-auth.guard.js";
@@ -66,7 +66,8 @@ export class BusinessController {
 
   @Get("public/:slug")
   async publicBusiness(@Param("slug") slug: string) {
-    const business = await this.prisma.business.findUniqueOrThrow({ where: { slug } });
+    const business = await this.prisma.business.findFirst({ where: { slug, status: "active" } });
+    if (!business) throw new NotFoundException("Business not found");
     return {
       id: business.id,
       name: business.name,

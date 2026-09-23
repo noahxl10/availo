@@ -44,6 +44,9 @@ jobs:
           npm exec --workspace @availo/api -- prisma migrate deploy
 
       - name: Seed test database
+        env:
+          AVAILO_ALLOW_DESTRUCTIVE_SEED: "true"
+          AVAILO_DESTRUCTIVE_SEED_CONFIRM: reset-demo-data
         run: npm run db:seed
 
       - name: Typecheck
