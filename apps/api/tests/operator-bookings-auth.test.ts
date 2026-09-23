@@ -118,6 +118,85 @@ describe("authenticated operator booking reads", () => {
     }
   });
 
+  it("filters bookings by status and booking date inside the authenticated tenant", async () => {
+    const fixture = await createBookingReadFixture("tenant-filter", 0);
+    const otherFixture = await createBookingReadFixture("tenant-filter-hidden", 0);
+    const matchingOld = "bok_filter_confirmed_old";
+    const matchingNew = "bok_filter_confirmed_new";
+    const pending = "bok_filter_pending";
+    const canceled = "bok_filter_canceled";
+    const otherTenant = "bok_filter_hidden";
+
+    try {
+      await createFixtureBooking(fixture.businessId, fixture.listingId, matchingOld, new Date(Date.UTC(2026, 0, 5, 12, 0, 0)), "filter-confirmed-old", {
+        bookingDate: "2026-02-10",
+        status: "confirmed",
+        paymentStatus: "paid"
+      });
+      await createFixtureBooking(fixture.businessId, fixture.listingId, pending, new Date(Date.UTC(2026, 0, 6, 12, 0, 0)), "filter-pending", {
+        bookingDate: "2026-02-11",
+        status: "pending_payment",
+        paymentStatus: "pending"
+      });
+      await createFixtureBooking(fixture.businessId, fixture.listingId, matchingNew, new Date(Date.UTC(2026, 0, 7, 12, 0, 0)), "filter-confirmed-new", {
+        bookingDate: "2026-02-12",
+        status: "confirmed",
+        paymentStatus: "paid"
+      });
+      await createFixtureBooking(fixture.businessId, fixture.listingId, canceled, new Date(Date.UTC(2026, 0, 8, 12, 0, 0)), "filter-canceled", {
+        bookingDate: "2026-02-13",
+        status: "canceled",
+        paymentStatus: "failed"
+      });
+      await createFixtureBooking(otherFixture.businessId, otherFixture.listingId, otherTenant, new Date(Date.UTC(2026, 0, 9, 12, 0, 0)), "filter-hidden", {
+        bookingDate: "2026-02-12",
+        status: "confirmed",
+        paymentStatus: "paid"
+      });
+
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+        const token = await signToken(fixture.userId, fixture.businessId);
+
+        const confirmedResponse = await getBookings(baseUrl, token, "?status=confirmed");
+        expect(confirmedResponse.status).toBe(200);
+        const confirmed = (await confirmedResponse.json()) as BookingPage;
+        expect(confirmed.items.map((booking) => booking.id)).toEqual([matchingNew, matchingOld]);
+        expect(confirmed.items.every((booking) => booking.status === "confirmed")).toBe(true);
+        expect(JSON.stringify(confirmed)).not.toContain(otherTenant);
+        expect(JSON.stringify(confirmed)).not.toContain("paymentReferenceId");
+        expect(JSON.stringify(confirmed)).not.toContain("paymentIntentId");
+        expect(JSON.stringify(confirmed)).not.toContain("paymentExpiresAt");
+
+        const fromDateResponse = await getBookings(baseUrl, token, "?fromDate=2026-02-12");
+        expect(fromDateResponse.status).toBe(200);
+        await expect(fromDateResponse.json()).resolves.toMatchObject({ items: [{ id: canceled }, { id: matchingNew }], nextCursor: null });
+
+        const dateRangeResponse = await getBookings(baseUrl, token, "?fromDate=2026-02-11&toDate=2026-02-12");
+        expect(dateRangeResponse.status).toBe(200);
+        await expect(dateRangeResponse.json()).resolves.toMatchObject({ items: [{ id: matchingNew }, { id: pending }], nextCursor: null });
+
+        const firstFilteredPageResponse = await getBookings(baseUrl, token, "?status=confirmed&fromDate=2026-02-10&toDate=2026-02-12&limit=1");
+        expect(firstFilteredPageResponse.status).toBe(200);
+        const firstFilteredPage = (await firstFilteredPageResponse.json()) as BookingPage;
+        expect(firstFilteredPage.items.map((booking) => booking.id)).toEqual([matchingNew]);
+        expect(firstFilteredPage.nextCursor).toEqual(expect.any(String));
+
+        const secondFilteredPageResponse = await getBookings(
+          baseUrl,
+          token,
+          `?status=confirmed&fromDate=2026-02-10&toDate=2026-02-12&limit=1&cursor=${encodeURIComponent(firstFilteredPage.nextCursor ?? "")}`
+        );
+        expect(secondFilteredPageResponse.status).toBe(200);
+        const secondFilteredPage = (await secondFilteredPageResponse.json()) as BookingPage;
+        expect(secondFilteredPage.items.map((booking) => booking.id)).toEqual([matchingOld]);
+        expect(secondFilteredPage.nextCursor).toBeNull();
+      });
+    } finally {
+      await cleanupBookingReadFixture(otherFixture.businessId);
+      await cleanupBookingReadFixture(fixture.businessId);
+    }
+  });
+
   it("caps invalid pagination input before reading bookings", async () => {
     const fixture = await createBookingReadFixture("tenant-pagination", 1);
 
@@ -128,6 +207,10 @@ describe("authenticated operator booking reads", () => {
         await expect(getBookings(baseUrl, token, "?limit=101")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?limit=not-a-number")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?cursor=not-a-cursor")).resolves.toMatchObject({ status: 400 });
+        await expect(getBookings(baseUrl, token, "?status=paid")).resolves.toMatchObject({ status: 400 });
+        await expect(getBookings(baseUrl, token, "?fromDate=2026-02-30")).resolves.toMatchObject({ status: 400 });
+        await expect(getBookings(baseUrl, token, "?toDate=02-28-2026")).resolves.toMatchObject({ status: 400 });
+        await expect(getBookings(baseUrl, token, "?fromDate=2026-03-01&toDate=2026-02-28")).resolves.toMatchObject({ status: 400 });
 
         const defaultResponse = await getBookings(baseUrl, token);
         expect(defaultResponse.status).toBe(200);
@@ -535,7 +618,7 @@ describe("authenticated operator booking reads", () => {
 });
 
 type BookingPage = {
-  items: { id: string }[];
+  items: { id: string; status: string }[];
   nextCursor: string | null;
 };
 
