@@ -1,6 +1,9 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
+import type { AuthenticatedActor } from "../auth/auth-context.js";
+import { prefixedId } from "../common/ids.js";
+import { StripeCheckoutClient } from "../payments/stripe-checkout.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 const DEFAULT_LIMIT = 25;
@@ -18,7 +21,10 @@ const cursorPayload = z.object({
 
 @Injectable()
 export class BookingService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Optional() private readonly stripeCheckout: StripeCheckoutClient = new StripeCheckoutClient()
+  ) {}
 
   async list(businessId: string, query: { limit?: string | undefined; cursor?: string | undefined }) {
     const { limit, cursor } = parseListQuery(query);
@@ -49,6 +55,72 @@ export class BookingService {
     });
     if (!booking) throw new NotFoundException("Booking not found");
     return toOperatorBookingResponse(booking);
+  }
+
+  async cancel(actor: AuthenticatedActor, id: string) {
+    const candidate = await this.prisma.booking.findFirst({
+      where: { id, businessId: actor.businessId },
+      select: { id: true, status: true, paymentStatus: true, paymentProvider: true, paymentReferenceId: true }
+    });
+    if (!candidate) throw new NotFoundException("Booking not found");
+    if (candidate.status !== "pending_payment" || candidate.paymentStatus !== "pending") {
+      throw new ConflictException("Only unpaid pending bookings can be canceled");
+    }
+    if (candidate.paymentProvider === "stripe") {
+      if (!candidate.paymentReferenceId) throw new ServiceUnavailableException("Stripe Checkout session is not attached to this booking");
+      await this.expireStripeCheckoutSession(candidate.paymentReferenceId);
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.booking.findFirst({
+        where: { id, businessId: actor.businessId },
+        select: { id: true, businessId: true, status: true, paymentStatus: true, paymentProvider: true, paymentReferenceId: true }
+      });
+      if (!existing) throw new NotFoundException("Booking not found");
+      if (existing.status !== "pending_payment" || existing.paymentStatus !== "pending") {
+        throw new ConflictException("Only unpaid pending bookings can be canceled");
+      }
+
+      const updated = await tx.booking.updateMany({
+        where: {
+          id,
+          businessId: actor.businessId,
+          status: "pending_payment",
+          paymentStatus: "pending",
+          paymentProvider: existing.paymentProvider,
+          paymentReferenceId: existing.paymentReferenceId
+        },
+        data: { status: "canceled", paymentStatus: "failed" }
+      });
+      if (updated.count !== 1) throw new ConflictException("Only unpaid pending bookings can be canceled");
+
+      await tx.auditLog.create({
+        data: {
+          id: prefixedId("aud"),
+          businessId: actor.businessId,
+          userId: actor.userId,
+          action: "booking.canceled",
+          entityType: "booking",
+          entityId: id,
+          metadataJson: JSON.stringify({ previousStatus: existing.status, previousPaymentStatus: existing.paymentStatus })
+        }
+      });
+
+      const booking = await tx.booking.findFirst({
+        where: { id, businessId: actor.businessId },
+        include: { listing: true, addOns: { include: { addOn: true } } }
+      });
+      if (!booking) throw new NotFoundException("Booking not found");
+      return toOperatorBookingResponse(booking);
+    });
+  }
+
+  private async expireStripeCheckoutSession(sessionId: string) {
+    try {
+      await this.stripeCheckout.expireCheckoutSession(sessionId);
+    } catch {
+      throw new ServiceUnavailableException("Stripe Checkout session could not be expired");
+    }
   }
 }
 
