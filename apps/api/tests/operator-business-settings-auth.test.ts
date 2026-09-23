@@ -155,8 +155,9 @@ describe("authenticated operator business settings", () => {
     }
   });
 
-  it("keeps public business lookup and onboarding creation behavior separate", async () => {
+  it("keeps public business lookup active-only and onboarding creation behavior separate", async () => {
     const fixture = await createBusinessFixture("tenant-business-public", "owner");
+    const suspendedFixture = await createBusinessFixture("tenant-business-suspended-public", "owner", "suspended");
     const createdSlug = `onboarding-${prefixedId("biz").replaceAll("_", "-")}`;
 
     try {
@@ -169,6 +170,8 @@ describe("authenticated operator business settings", () => {
         expect(publicBusiness).not.toHaveProperty("taxRateBps");
         expect(publicBusiness).not.toHaveProperty("addressJson");
 
+        await expect(fetch(`${baseUrl}/business/public/${suspendedFixture.slug}`)).resolves.toMatchObject({ status: 404 });
+
         const createResponse = await fetch(`${baseUrl}/business`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -179,6 +182,7 @@ describe("authenticated operator business settings", () => {
       });
     } finally {
       await prisma.business.deleteMany({ where: { slug: createdSlug } });
+      await cleanupBusinessFixture(suspendedFixture.businessId);
       await cleanupBusinessFixture(fixture.businessId);
     }
   });
@@ -217,7 +221,7 @@ describe("authenticated operator business settings", () => {
     return jwt.sign({ sub: userId, businessId, role: "owner", sid: sessionId }, jwtSecret, { expiresIn: "15m" });
   }
 
-  async function createBusinessFixture(slugSeed: string, role: "owner" | "admin" | "staff" | "viewer") {
+  async function createBusinessFixture(slugSeed: string, role: "owner" | "admin" | "staff" | "viewer", status: "active" | "suspended" = "active") {
     const businessId = prefixedId("biz");
     const userId = prefixedId("usr");
     const slug = `${slugSeed}-${businessId}`;
@@ -227,7 +231,7 @@ describe("authenticated operator business settings", () => {
         id: businessId,
         name: `Operator ${slugSeed}`,
         slug,
-        status: "active",
+        status,
         timezone: "America/Denver",
         currency: "USD",
         supportEmail: `support-${slugSeed}@example.invalid`,
