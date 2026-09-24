@@ -392,7 +392,7 @@ GET /bookings?limit=25&cursor=...
 GET /listings?limit=50&cursor=...
 ```
 
-`GET /bookings` is an authenticated operator API. It derives the tenant from the verified access token and returns `{ "items": [...], "nextCursor": "..." }`, with `limit` defaulting to `25` and capped at `100`. `GET /bookings/:id` must use the same tenant scope and return a generic `404` for both missing and cross-tenant IDs.
+`GET /bookings` is an authenticated operator API. It derives the tenant from the verified access token and returns `{ "items": [...], "nextCursor": "..." }`, with `limit` defaulting to `25` and capped at `100`. It accepts optional `status`, `fromDate`, and `toDate` filters; dates must be real `YYYY-MM-DD` calendar dates and `fromDate` must not be later than `toDate`. `GET /bookings/:id` must use the same tenant scope and return a generic `404` for both missing and cross-tenant IDs.
 
 5. Use select projections:
 

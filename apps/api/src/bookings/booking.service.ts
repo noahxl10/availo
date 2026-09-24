@@ -11,7 +11,10 @@ const MAX_LIMIT = 100;
 
 const listQuery = z.object({
   limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(DEFAULT_LIMIT),
-  cursor: z.string().min(1).max(240).optional()
+  cursor: z.string().min(1).max(240).optional(),
+  status: z.enum(["pending_payment", "confirmed", "canceled", "refunded", "partially_refunded", "failed"]).optional(),
+  fromDate: z.string().refine(isRealIsoDate).optional(),
+  toDate: z.string().refine(isRealIsoDate).optional()
 });
 
 const cursorPayload = z.object({
@@ -26,12 +29,17 @@ export class BookingService {
     @Optional() private readonly stripeCheckout: StripeCheckoutClient = new StripeCheckoutClient()
   ) {}
 
-  async list(businessId: string, query: { limit?: string | undefined; cursor?: string | undefined }) {
-    const { limit, cursor } = parseListQuery(query);
+  async list(
+    businessId: string,
+    query: { limit?: string | undefined; cursor?: string | undefined; status?: string | undefined; fromDate?: string | undefined; toDate?: string | undefined }
+  ) {
+    const { limit, cursor, status, fromDate, toDate } = parseListQuery(query);
     const cursorWhere = cursor ? decodeCursor(cursor) : null;
     const rows = await this.prisma.booking.findMany({
       where: {
         businessId,
+        ...(status ? { status } : {}),
+        ...dateRangeWhere(fromDate, toDate),
         ...(cursorWhere
           ? {
               OR: [{ createdAt: { lt: cursorWhere.createdAt } }, { createdAt: cursorWhere.createdAt, id: { lt: cursorWhere.id } }]
@@ -172,12 +180,35 @@ function toOperatorBookingResponse(booking: BookingWithDetails) {
   };
 }
 
-function parseListQuery(query: { limit?: string | undefined; cursor?: string | undefined }) {
+function parseListQuery(query: { limit?: string | undefined; cursor?: string | undefined; status?: string | undefined; fromDate?: string | undefined; toDate?: string | undefined }) {
   try {
-    return listQuery.parse(query);
+    const parsed = listQuery.parse(query);
+    if (parsed.fromDate && parsed.toDate && parsed.fromDate > parsed.toDate) throw new Error("Invalid date range");
+    return parsed;
   } catch {
-    throw new BadRequestException("Invalid booking pagination query");
+    throw new BadRequestException("Invalid booking list query");
   }
+}
+
+function dateRangeWhere(fromDate: string | undefined, toDate: string | undefined): Prisma.BookingWhereInput {
+  if (!fromDate && !toDate) return {};
+  return {
+    bookingDate: {
+      ...(fromDate ? { gte: fromDate } : {}),
+      ...(toDate ? { lte: toDate } : {})
+    }
+  };
+}
+
+function isRealIsoDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
 }
 
 function encodeCursor(row: { createdAt: Date; id: string }) {

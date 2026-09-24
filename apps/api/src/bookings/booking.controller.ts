@@ -10,8 +10,15 @@ export class BookingController {
   constructor(@Inject(BookingService) private readonly bookings: BookingService) {}
 
   @Get()
-  list(@CurrentActor() actor: AuthenticatedActor, @Query("limit") limit?: string, @Query("cursor") cursor?: string) {
-    return this.bookings.list(actor.businessId, { limit, cursor });
+  list(
+    @CurrentActor() actor: AuthenticatedActor,
+    @Query("limit") limit?: string,
+    @Query("cursor") cursor?: string,
+    @Query("status") status?: string,
+    @Query("fromDate") fromDate?: string,
+    @Query("toDate") toDate?: string
+  ) {
+    return this.bookings.list(actor.businessId, { limit, cursor, status, fromDate, toDate });
   }
 
   @Get(":id")
