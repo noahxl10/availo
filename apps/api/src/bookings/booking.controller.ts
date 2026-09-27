@@ -16,9 +16,10 @@ export class BookingController {
     @Query("cursor") cursor?: string,
     @Query("status") status?: string,
     @Query("fromDate") fromDate?: string,
-    @Query("toDate") toDate?: string
+    @Query("toDate") toDate?: string,
+    @Query("view") view?: string
   ) {
-    return this.bookings.list(actor.businessId, { limit, cursor, status, fromDate, toDate });
+    return this.bookings.list(actor.businessId, { limit, cursor, status, fromDate, toDate, view });
   }
 
   @Get(":id")

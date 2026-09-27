@@ -14,7 +14,8 @@ const listQuery = z.object({
   cursor: z.string().min(1).max(240).optional(),
   status: z.enum(["pending_payment", "confirmed", "canceled", "refunded", "partially_refunded", "failed"]).optional(),
   fromDate: z.string().refine(isRealIsoDate).optional(),
-  toDate: z.string().refine(isRealIsoDate).optional()
+  toDate: z.string().refine(isRealIsoDate).optional(),
+  view: z.enum(["full", "summary"]).default("full")
 });
 
 const cursorPayload = z.object({
@@ -31,29 +32,51 @@ export class BookingService {
 
   async list(
     businessId: string,
-    query: { limit?: string | undefined; cursor?: string | undefined; status?: string | undefined; fromDate?: string | undefined; toDate?: string | undefined }
+    query: { limit?: string | undefined; cursor?: string | undefined; status?: string | undefined; fromDate?: string | undefined; toDate?: string | undefined; view?: string | undefined }
   ) {
-    const { limit, cursor, status, fromDate, toDate } = parseListQuery(query);
+    const { limit, cursor, status, fromDate, toDate, view } = parseListQuery(query);
     const cursorWhere = cursor ? decodeCursor(cursor) : null;
-    const rows = await this.prisma.booking.findMany({
-      where: {
-        businessId,
-        ...(status ? { status } : {}),
-        ...dateRangeWhere(fromDate, toDate),
-        ...(cursorWhere
-          ? {
-              OR: [{ createdAt: { lt: cursorWhere.createdAt } }, { createdAt: cursorWhere.createdAt, id: { lt: cursorWhere.id } }]
-            }
-          : {})
-      },
-      include: { listing: true, addOns: { include: { addOn: true } } },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: limit + 1
-    });
+    const where: Prisma.BookingWhereInput = {
+      businessId,
+      ...(status ? { status } : {}),
+      ...dateRangeWhere(fromDate, toDate),
+      ...(cursorWhere
+        ? {
+            OR: [{ createdAt: { lt: cursorWhere.createdAt } }, { createdAt: cursorWhere.createdAt, id: { lt: cursorWhere.id } }]
+          }
+        : {})
+    };
+    const orderBy = [{ createdAt: "desc" as const }, { id: "desc" as const }];
+    const rows = view === "summary"
+      ? await this.prisma.booking.findMany({
+          where,
+          select: {
+            id: true,
+            createdAt: true,
+            customerName: true,
+            bookingDate: true,
+            startTime: true,
+            guestCount: true,
+            status: true,
+            totalCents: true,
+            listing: { select: { id: true, title: true } }
+          },
+          orderBy,
+          take: limit + 1
+        })
+      : await this.prisma.booking.findMany({
+          where,
+          include: { listing: true, addOns: { include: { addOn: true } } },
+          orderBy,
+          take: limit + 1
+        });
     const items = rows.slice(0, limit);
     const nextRow = rows[limit];
     const lastItem = items.at(-1);
-    return { items: items.map(toOperatorBookingResponse), nextCursor: nextRow && lastItem ? encodeCursor(lastItem) : null };
+    return {
+      items: items.map((booking) => view === "summary" ? toOperatorBookingSummary(booking) : toOperatorBookingResponse(booking as BookingWithDetails)),
+      nextCursor: nextRow && lastItem ? encodeCursor(lastItem) : null
+    };
   }
 
   async get(businessId: string, id: string) {
@@ -180,7 +203,29 @@ function toOperatorBookingResponse(booking: BookingWithDetails) {
   };
 }
 
-function parseListQuery(query: { limit?: string | undefined; cursor?: string | undefined; status?: string | undefined; fromDate?: string | undefined; toDate?: string | undefined }) {
+function toOperatorBookingSummary(booking: {
+  id: string;
+  customerName: string;
+  bookingDate: string;
+  startTime: string;
+  guestCount: number;
+  status: string;
+  totalCents: number;
+  listing: { id: string; title: string };
+}) {
+  return {
+    id: booking.id,
+    customerName: booking.customerName,
+    bookingDate: booking.bookingDate,
+    startTime: booking.startTime,
+    guestCount: booking.guestCount,
+    status: booking.status,
+    totalCents: booking.totalCents,
+    listing: { id: booking.listing.id, title: booking.listing.title }
+  };
+}
+
+function parseListQuery(query: { limit?: string | undefined; cursor?: string | undefined; status?: string | undefined; fromDate?: string | undefined; toDate?: string | undefined; view?: string | undefined }) {
   try {
     const parsed = listQuery.parse(query);
     if (parsed.fromDate && parsed.toDate && parsed.fromDate > parsed.toDate) throw new Error("Invalid date range");

@@ -10,6 +10,7 @@ import {
 import {
   DashboardAuthRequiredError,
   DashboardBookingNotFoundError,
+  fetchDashboardBookings,
   DashboardListingForbiddenError,
   DashboardListingValidationError,
   DashboardLoginRejectedError,
@@ -21,6 +22,9 @@ import {
   fetchDashboardOverview,
   loginDashboardSession,
   type DashboardBookingDetail,
+  type DashboardBookingListFilters,
+  type DashboardBookingListItem,
+  type DashboardBookingListPage,
   type DashboardListingDraft,
   type DashboardListingDraftInput,
   type DashboardLoginInput,
@@ -40,10 +44,11 @@ import {
   supportsDashboardSessionCoordination
 } from "../lib/browser-session";
 
-type Screen = "dashboard" | "listings" | "create" | "booking" | "availability" | "customers" | "embed" | "analytics";
+type Screen = "dashboard" | "listings" | "create" | "bookings" | "booking" | "availability" | "customers" | "embed" | "analytics";
 type ListingTab = "details" | "pricing";
 type ApiStatus = "loading" | "live" | "auth" | "error" | "unsupported";
 type BookingDetailStatus = "idle" | "loading" | "live" | "not-found" | "error";
+const INVALID_BOOKING_DATE_RANGE_ERROR = "The start date must be on or before the end date.";
 type ListingDraftForm = {
   title: string;
   category: string;
@@ -56,6 +61,20 @@ type ListingDraftForm = {
   maxGuests: string;
   capacity: string;
 };
+
+export function dashboardSessionIdentity(user: Pick<DashboardUser, "id" | "businessId"> | null): string | null {
+  return user ? JSON.stringify([user.id, user.businessId]) : null;
+}
+
+export function shouldReloadDashboardForSession(previousIdentity: string | null, nextIdentity: string | null): boolean {
+  return previousIdentity !== nextIdentity;
+}
+
+export function resetDashboardDataForIdentityChange(previousIdentity: string | null, nextIdentity: string | null, reset: () => void): boolean {
+  if (!shouldReloadDashboardForSession(previousIdentity, nextIdentity)) return false;
+  reset();
+  return true;
+}
 
 const initialListingDraftForm: ListingDraftForm = {
   title: "",
@@ -73,7 +92,7 @@ const initialListingDraftForm: ListingDraftForm = {
 function navIdToScreen(id: string): Screen | null {
   if (id === "dashboard") return "dashboard";
   if (id === "listings") return "listings";
-  if (id === "bookings") return "booking";
+  if (id === "bookings") return "bookings";
   if (id === "availability") return "availability";
   if (id === "customers") return "customers";
   if (id === "embed") return "embed";
@@ -92,6 +111,11 @@ export function DashboardShell() {
   const [selectedBookingId, setSelectedBookingId] = useState<string | null>(null);
   const [bookingDetail, setBookingDetail] = useState<DashboardBookingDetail | null>(null);
   const [bookingDetailStatus, setBookingDetailStatus] = useState<BookingDetailStatus>("idle");
+  const [bookingPage, setBookingPage] = useState<DashboardBookingListPage>({ items: [], nextCursor: null });
+  const [bookingListStatus, setBookingListStatus] = useState<"idle" | "loading" | "live" | "error">("idle");
+  const [bookingListError, setBookingListError] = useState<string | null>(null);
+  const [bookingFilters, setBookingFilters] = useState({ status: "", fromDate: "", toDate: "" });
+  const [appliedBookingFilters, setAppliedBookingFilters] = useState<DashboardBookingListFilters>({});
   const [listingDraftForm, setListingDraftForm] = useState<ListingDraftForm>(initialListingDraftForm);
   const [listingDraftError, setListingDraftError] = useState<string | null>(null);
   const [listingNotice, setListingNotice] = useState<string | null>(null);
@@ -99,6 +123,10 @@ export function DashboardShell() {
   const [savingListingDraft, setSavingListingDraft] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const bookingRequestIdRef = useRef(0);
+  const bookingListRequestIdRef = useRef(0);
+  const lastBookingListRequestRef = useRef<{ filters: DashboardBookingListFilters; append: boolean } | null>(null);
+  const overviewRequestIdRef = useRef(0);
+  const sessionIdentityRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -106,15 +134,41 @@ export function DashboardShell() {
     const unsubscribe = subscribeDashboardSession((session) => {
       if (!active) return;
       if (session) {
+        const nextIdentity = dashboardSessionIdentity(session.user);
+        const previousIdentity = sessionIdentityRef.current;
+        sessionIdentityRef.current = nextIdentity;
         setOperator(session.user);
+        if (resetDashboardDataForIdentityChange(previousIdentity, nextIdentity, () => resetTenantOwnedData())) {
+          const requestId = ++overviewRequestIdRef.current;
+          setApiStatus("loading");
+          void loadOverviewWithOneRefresh(session.accessToken)
+            .then(({ session: loadedSession, nextOverview }) => {
+              if (!active || overviewRequestIdRef.current !== requestId || sessionIdentityRef.current !== dashboardSessionIdentity(loadedSession.user)) return;
+              setOperator(loadedSession.user);
+              setOverview(nextOverview);
+              setApiStatus("live");
+            })
+            .catch((error: unknown) => {
+              if (!active || overviewRequestIdRef.current !== requestId) return;
+              setOverview(emptyOverview);
+              setApiStatus(error instanceof DashboardAuthRequiredError || error instanceof DashboardLoginRejectedError ? "auth" : error instanceof DashboardSessionCoordinationError ? "unsupported" : "error");
+            });
+        }
         return;
       }
+      sessionIdentityRef.current = null;
+      overviewRequestIdRef.current += 1;
       setOperator(null);
       setOverview(emptyOverview);
       bookingRequestIdRef.current += 1;
       setSelectedBookingId(null);
       setBookingDetail(null);
       setBookingDetailStatus("idle");
+      bookingListRequestIdRef.current += 1;
+      setBookingPage({ items: [], nextCursor: null });
+      setBookingListStatus("idle");
+      setAppliedBookingFilters({});
+      lastBookingListRequestRef.current = null;
       setApiStatus("auth");
     });
     if (!supportsDashboardSessionCoordination()) {
@@ -125,16 +179,21 @@ export function DashboardShell() {
       };
     }
 
+    const requestId = ++overviewRequestIdRef.current;
     restoreDashboardSession()
-      .then((session) => loadOverviewWithOneRefresh(session.accessToken))
+      .then((session) => {
+        if (!active || overviewRequestIdRef.current !== requestId) throw new DashboardAuthRequiredError();
+        sessionIdentityRef.current = dashboardSessionIdentity(session.user);
+        return loadOverviewWithOneRefresh(session.accessToken);
+      })
       .then(({ session, nextOverview }) => {
-        if (!active) return;
+        if (!active || overviewRequestIdRef.current !== requestId || sessionIdentityRef.current !== dashboardSessionIdentity(session.user)) return;
         setOperator(session.user);
         setOverview(nextOverview);
         setApiStatus("live");
       })
       .catch((error: unknown) => {
-        if (!active) return;
+        if (!active || overviewRequestIdRef.current !== requestId) return;
         setOverview(emptyOverview);
         setApiStatus(error instanceof DashboardAuthRequiredError || error instanceof DashboardLoginRejectedError ? "auth" : error instanceof DashboardSessionCoordinationError ? "unsupported" : "error");
       });
@@ -147,22 +206,39 @@ export function DashboardShell() {
   async function handleLogin(input: DashboardLoginInput) {
     setSubmittingLogin(true);
     setLoginError(null);
+    const requestId = ++overviewRequestIdRef.current;
     try {
       if (!supportsDashboardSessionCoordination()) throw new DashboardSessionCoordinationError();
       const session = await loginDashboardSession(input);
+      if (overviewRequestIdRef.current !== requestId) return;
+      const nextIdentity = dashboardSessionIdentity(session.user);
+      resetDashboardDataForIdentityChange(sessionIdentityRef.current, nextIdentity, () => resetTenantOwnedData(true));
+      sessionIdentityRef.current = nextIdentity;
+      setOperator(session.user);
+      setApiStatus("loading");
       setMemoryDashboardSession(session);
       const loaded = await loadOverviewWithOneRefresh(session.accessToken);
+      if (overviewRequestIdRef.current !== requestId || sessionIdentityRef.current !== dashboardSessionIdentity(loaded.session.user)) return;
       setOperator(loaded.session.user);
+      sessionIdentityRef.current = dashboardSessionIdentity(loaded.session.user);
       const { nextOverview } = loaded;
       setOverview(nextOverview);
       setApiStatus("live");
     } catch (error) {
+      if (overviewRequestIdRef.current !== requestId) return;
       setOverview(emptyOverview);
+      sessionIdentityRef.current = null;
+      overviewRequestIdRef.current += 1;
       setOperator(null);
       bookingRequestIdRef.current += 1;
       setSelectedBookingId(null);
       setBookingDetail(null);
       setBookingDetailStatus("idle");
+      bookingListRequestIdRef.current += 1;
+      setBookingPage({ items: [], nextCursor: null });
+      setBookingListStatus("idle");
+      setAppliedBookingFilters({});
+      lastBookingListRequestRef.current = null;
       setApiStatus(error instanceof DashboardSessionCoordinationError ? "unsupported" : "auth");
       setLoginError(loginErrorMessage(error));
     } finally {
@@ -178,12 +254,19 @@ export function DashboardShell() {
       // Local session state still clears so a failed network logout does not strand the UI.
     } finally {
       clearMemoryDashboardSession();
+      sessionIdentityRef.current = null;
+      overviewRequestIdRef.current += 1;
       setOperator(null);
       setOverview(emptyOverview);
       bookingRequestIdRef.current += 1;
       setSelectedBookingId(null);
       setBookingDetail(null);
       setBookingDetailStatus("idle");
+      bookingListRequestIdRef.current += 1;
+      setBookingPage({ items: [], nextCursor: null });
+      setBookingListStatus("idle");
+      setAppliedBookingFilters({});
+      lastBookingListRequestRef.current = null;
       setApiStatus("auth");
       setSigningOut(false);
     }
@@ -220,6 +303,97 @@ export function DashboardShell() {
     }
   }
 
+  async function loadBookingList(filters: DashboardBookingListFilters, append = false) {
+    const session = currentDashboardSession();
+    if (!session) {
+      setApiStatus("auth");
+      return;
+    }
+    const requestId = ++bookingListRequestIdRef.current;
+    lastBookingListRequestRef.current = { filters, append };
+    setActiveNav("bookings");
+    setAppliedBookingFilters(filters);
+    if (!append) setBookingPage({ items: [], nextCursor: null });
+    setBookingListStatus("loading");
+    setBookingListError(null);
+    try {
+      const page = await loadBookingListWithOneRefresh(filters, session.accessToken);
+      const currentSession = currentDashboardSession();
+      if (bookingListRequestIdRef.current !== requestId || !currentSession || currentSession.user.id !== session.user.id || currentSession.user.businessId !== session.user.businessId) return;
+      setBookingPage((current) => append ? { items: [...current.items, ...page.items], nextCursor: page.nextCursor } : page);
+      setAppliedBookingFilters(filters);
+      setBookingListStatus("live");
+    } catch (error) {
+      if (bookingListRequestIdRef.current !== requestId) return;
+      if (error instanceof DashboardAuthRequiredError || error instanceof DashboardLoginRejectedError) {
+        setApiStatus("auth");
+        return;
+      }
+      setBookingListError("Could not load bookings. Check your connection and try again.");
+      setBookingListStatus("error");
+    }
+  }
+
+  function openBookings() {
+    setBookingFilters({ status: "", fromDate: "", toDate: "" });
+    void loadBookingList({});
+  }
+
+  function resetTenantOwnedData(preserveOverviewRequest = false) {
+    if (!preserveOverviewRequest) overviewRequestIdRef.current += 1;
+    bookingRequestIdRef.current += 1;
+    bookingListRequestIdRef.current += 1;
+    setActiveNav("dashboard");
+    setOperator(null);
+    setOverview(emptyOverview);
+    setSelectedBookingId(null);
+    setBookingDetail(null);
+    setBookingDetailStatus("idle");
+    setBookingPage({ items: [], nextCursor: null });
+    setBookingListStatus("idle");
+    setBookingListError(null);
+    setBookingFilters({ status: "", fromDate: "", toDate: "" });
+    setAppliedBookingFilters({});
+    lastBookingListRequestRef.current = null;
+    setListingDraftForm(initialListingDraftForm);
+    setListingTab("details");
+    setListingDraftError(null);
+    setListingNotice(null);
+  }
+
+  function applyBookingFilters() {
+    if (bookingFilters.fromDate && bookingFilters.toDate && bookingFilters.fromDate > bookingFilters.toDate) {
+      bookingListRequestIdRef.current += 1;
+      setBookingListError(INVALID_BOOKING_DATE_RANGE_ERROR);
+      setBookingListStatus("error");
+      return;
+    }
+    const filters: DashboardBookingListFilters = {};
+    if (bookingFilters.status) filters.status = bookingFilters.status;
+    if (bookingFilters.fromDate) filters.fromDate = bookingFilters.fromDate;
+    if (bookingFilters.toDate) filters.toDate = bookingFilters.toDate;
+    void loadBookingList(filters);
+  }
+
+  function retryBookingList() {
+    const request = lastBookingListRequestRef.current;
+    void retryFailedBookingList(request, loadBookingList);
+  }
+
+  function selectListedBooking(booking: DashboardBookingListItem) {
+    const summary = {
+      id: booking.id,
+      name: booking.customerName,
+      listing: booking.listing.title,
+      date: `${booking.bookingDate} · ${booking.startTime}`,
+      guests: booking.guestCount,
+      total: formatMoney(booking.totalCents),
+      status: bookingBadgeStatus(booking.status),
+      initials: booking.customerName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()
+    };
+    void handleBookingSelect(summary);
+  }
+
   async function handleListingDraftSubmit() {
     setListingDraftError(null);
     setListingNotice(null);
@@ -238,8 +412,11 @@ export function DashboardShell() {
     }
 
     setSavingListingDraft(true);
+    const requestId = ++overviewRequestIdRef.current;
+    const identity = dashboardSessionIdentity(session.user);
     try {
       const { draft, loaded } = await saveListingDraftAndReloadOverview(input, session.accessToken);
+      if (overviewRequestIdRef.current !== requestId || sessionIdentityRef.current !== identity || dashboardSessionIdentity(loaded.session.user) !== identity) return;
       setOperator(loaded.session.user);
       setOverview(loaded.nextOverview);
       setListingDraftForm(initialListingDraftForm);
@@ -247,6 +424,7 @@ export function DashboardShell() {
       setListingNotice(`${draft.title} was saved as a draft.`);
       setActiveNav("listings");
     } catch (error) {
+      if (overviewRequestIdRef.current !== requestId || sessionIdentityRef.current !== identity) return;
       if (error instanceof DashboardAuthRequiredError || error instanceof DashboardLoginRejectedError) {
         setApiStatus("auth");
         setListingDraftError("Please sign in again before saving this listing.");
@@ -273,6 +451,7 @@ export function DashboardShell() {
     listings: "Listings",
     create: "New Listing",
     booking: selectedBookingId ? `#${selectedBookingId}` : "Booking Detail",
+    bookings: "Bookings",
     availability: "Availability",
     customers: "Customers",
     embed: "Embed Widget",
@@ -287,6 +466,7 @@ export function DashboardShell() {
       : selectedBookingSummary
         ? `${selectedBookingSummary.listing} · ${selectedBookingSummary.date}`
         : "Select a booking from recent activity",
+    bookings: `${bookingPage.items.length} ${pluralize(bookingPage.items.length, "booking")} loaded from the live API.`,
     availability: "May schedule, capacity, and booked days from the live API.",
     customers: `${customerCount} customers from recent booking activity.`,
     embed: "Add a booking widget to any website in under 5 minutes.",
@@ -304,9 +484,9 @@ export function DashboardShell() {
           {navItems.map((item) => (
             <button
               className="dashboard-nav-item"
-              data-active={activeNav === navIdToScreen(item.id)}
+              data-active={activeNav === navIdToScreen(item.id) || (item.id === "bookings" && activeNav === "booking")}
               key={item.id}
-              onClick={() => setActiveNav(navIdToScreen(item.id) ?? "dashboard")}
+              onClick={() => navIdToScreen(item.id) === "bookings" ? openBookings() : setActiveNav(navIdToScreen(item.id) ?? "dashboard")}
               title={collapsed ? item.label : undefined}
               type="button"
             >
@@ -388,7 +568,7 @@ export function DashboardShell() {
         </div>
 
         {apiStatus !== "live" && <DashboardUnavailable error={loginError} onLogin={handleLogin} status={apiStatus} submitting={submittingLogin} />}
-        {apiStatus === "live" && activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={handleBookingSelect} />}
+        {apiStatus === "live" && activeNav === "dashboard" && <DashboardOverview overview={overview} onBooking={handleBookingSelect} onViewAll={openBookings} />}
         {apiStatus === "live" && activeNav === "listings" && <ListingsManager listings={overview.listings} notice={listingNotice} onCreate={() => setActiveNav("create")} />}
         {apiStatus === "live" && activeNav === "create" && (
           <CreateListing
@@ -402,6 +582,18 @@ export function DashboardShell() {
           />
         )}
         {apiStatus === "live" && activeNav === "booking" && <BookingDetail detail={bookingDetail} status={bookingDetailStatus} summary={selectedBookingSummary} />}
+        {apiStatus === "live" && activeNav === "bookings" && <BookingsManager
+          error={bookingListError}
+          filters={bookingFilters}
+          onApplyFilters={applyBookingFilters}
+          onChangeFilters={setBookingFilters}
+          onLoadMore={() => bookingPage.nextCursor && void loadBookingList({ ...appliedBookingFilters, cursor: bookingPage.nextCursor }, true)}
+          canRetry={canRetryBookingList(bookingListError, lastBookingListRequestRef.current)}
+          onRetry={retryBookingList}
+          onSelect={selectListedBooking}
+          page={bookingPage}
+          status={bookingListStatus}
+        />}
         {apiStatus === "live" && activeNav === "availability" && <AvailabilityManager overview={overview} />}
         {apiStatus === "live" && activeNav === "customers" && <CustomersManager bookings={overview.bookings} />}
         {apiStatus === "live" && activeNav === "embed" && <EmbedSetup businessName={businessName} listing={primaryListing} />}
@@ -411,9 +603,9 @@ export function DashboardShell() {
       <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
         {mobileNavItems.map((item) => (
           <button
-            data-active={activeNav === navIdToScreen(item.id)}
+            data-active={activeNav === navIdToScreen(item.id) || (item.id === "bookings" && activeNav === "booking")}
             key={item.id}
-            onClick={() => setActiveNav(navIdToScreen(item.id) ?? "dashboard")}
+            onClick={() => navIdToScreen(item.id) === "bookings" ? openBookings() : setActiveNav(navIdToScreen(item.id) ?? "dashboard")}
             type="button"
           >
             <span aria-hidden="true">{item.icon}</span>
@@ -448,6 +640,28 @@ async function loadBookingDetailWithOneRefresh(bookingId: string, accessToken: s
   }
 }
 
+export async function loadBookingListWithOneRefresh(filters: DashboardBookingListFilters, accessToken: string): Promise<DashboardBookingListPage> {
+  try {
+    return await fetchDashboardBookings(filters, accessToken);
+  } catch (error) {
+    if (!(error instanceof DashboardAuthRequiredError)) throw error;
+    const session = await refreshDashboardSessionAfterStaleToken(accessToken);
+    return fetchDashboardBookings(filters, session.accessToken);
+  }
+}
+
+export function canRetryBookingList(error: string | null, request: { filters: DashboardBookingListFilters; append: boolean } | null) {
+  return request !== null && error !== INVALID_BOOKING_DATE_RANGE_ERROR;
+}
+
+export async function retryFailedBookingList<T>(
+  request: { filters: DashboardBookingListFilters; append: boolean } | null,
+  load: (filters: DashboardBookingListFilters, append?: boolean) => Promise<T>
+): Promise<T | undefined> {
+  if (!request) return undefined;
+  return load(request.filters, request.append);
+}
+
 async function createListingDraftWithOneRefresh(input: DashboardListingDraftInput, accessToken: string) {
   try {
     return await createDashboardListingDraft(input, accessToken);
@@ -469,10 +683,12 @@ export async function saveListingDraftAndReloadOverview(input: DashboardListingD
 }
 
 function DashboardOverview({
+  onViewAll,
   onBooking,
   overview
 }: {
   onBooking: (booking: DashboardOverview["bookings"][number]) => void;
+  onViewAll: () => void;
   overview: DashboardOverview;
 }) {
   return (
@@ -483,12 +699,116 @@ function DashboardOverview({
         ))}
       </section>
       <section className="workspace-grid">
-        <RecentBookings bookings={overview.bookings} onBooking={onBooking} />
+        <RecentBookings bookings={overview.bookings} onBooking={onBooking} onViewAll={onViewAll} />
         <MiniCalendar bookedDates={overview.bookedDates} fullDates={overview.fullDates} />
       </section>
       <ListingGrid listings={overview.listings} />
     </>
   );
+}
+
+function BookingsManager({
+  error,
+  filters,
+  onApplyFilters,
+  onChangeFilters,
+  canRetry,
+  onLoadMore,
+  onRetry,
+  onSelect,
+  page,
+  status
+}: {
+  error: string | null;
+  filters: { status: string; fromDate: string; toDate: string };
+  onApplyFilters: () => void;
+  onChangeFilters: (filters: { status: string; fromDate: string; toDate: string }) => void;
+  canRetry: boolean;
+  onLoadMore: () => void;
+  onRetry: () => void;
+  onSelect: (booking: DashboardBookingListItem) => void;
+  page: DashboardBookingListPage;
+  status: "idle" | "loading" | "live" | "error";
+}) {
+  return (
+    <section className="bookings-manager" aria-label="Bookings">
+      <form className="bookings-filters" onSubmit={(event) => { event.preventDefault(); onApplyFilters(); }}>
+        <label>
+          <span>Status</span>
+          <Select aria-label="Booking status" onChange={(event) => onChangeFilters({ ...filters, status: event.target.value })} value={filters.status}>
+            <option value="">All statuses</option>
+            <option value="pending_payment">Pending payment</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="canceled">Canceled</option>
+            <option value="refunded">Refunded</option>
+            <option value="partially_refunded">Partially refunded</option>
+            <option value="failed">Failed</option>
+          </Select>
+        </label>
+        <label>
+          <span>From</span>
+          <Input aria-label="From date" onChange={(event) => onChangeFilters({ ...filters, fromDate: event.target.value })} type="date" value={filters.fromDate} />
+        </label>
+        <label>
+          <span>To</span>
+          <Input aria-label="To date" onChange={(event) => onChangeFilters({ ...filters, toDate: event.target.value })} type="date" value={filters.toDate} />
+        </label>
+        <Button disabled={status === "loading"} type="submit">Apply filters</Button>
+      </form>
+
+      {status === "loading" && page.items.length === 0 && <EmptyState icon="◌" title="Loading bookings" body="Fetching bookings for this operator." />}
+      {status === "error" && (
+        <div className="bookings-message" role="alert">
+          <p>{error ?? "Could not load bookings."}</p>
+          {canRetry && <Button onClick={onRetry} type="button" variant="secondary">Retry</Button>}
+        </div>
+      )}
+      {status === "live" && page.items.length === 0 && (
+        <EmptyState icon="◷" title={hasBookingFilters(filters) ? "No matching bookings" : "No bookings yet"} body={hasBookingFilters(filters) ? "Try changing the filters to see more bookings." : "Bookings will appear here when customers reserve an activity."} />
+      )}
+      {page.items.length > 0 && (
+        <Card className="bookings-table-card" padded={false}>
+          <div className="booking-list">
+            {page.items.map((booking) => (
+              <button className="booking-row" key={booking.id} onClick={() => onSelect(booking)} type="button">
+                <span className="booking-row__avatar">{booking.customerName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span>
+                <span className="booking-row__copy">
+                  <strong>{booking.customerName}</strong>
+                  <span>{booking.listing.title} · {booking.bookingDate} · {booking.startTime} · {booking.guestCount} {pluralize(booking.guestCount, "guest")}</span>
+                </span>
+                <span className="booking-row__total">{formatMoney(booking.totalCents)}</span>
+                <Badge status={bookingListBadgeStatus(booking.status)}>{bookingStatusLabel(booking.status)}</Badge>
+              </button>
+            ))}
+          </div>
+          <div className="bookings-pagination">
+            {status === "loading" && page.items.length > 0 && <span aria-live="polite">Loading more bookings…</span>}
+            {page.nextCursor ? <Button disabled={status === "loading"} onClick={onLoadMore} type="button" variant="secondary">Load more</Button> : <span>{page.items.length ? "You’ve reached the end." : ""}</span>}
+          </div>
+        </Card>
+      )}
+    </section>
+  );
+}
+
+function hasBookingFilters(filters: { status: string; fromDate: string; toDate: string }) {
+  return Boolean(filters.status || filters.fromDate || filters.toDate);
+}
+
+function bookingListBadgeStatus(status: DashboardBookingListItem["status"]): "confirmed" | "pending" | "cancelled" {
+  return bookingBadgeStatus(status);
+}
+
+function bookingStatusLabel(status: DashboardBookingListItem["status"]) {
+  return status === "pending_payment" ? "Pending payment" : status.replaceAll("_", " ").replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+function formatMoney(cents: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
+}
+
+export function pluralize(count: number, singular: string) {
+  return count === 1 ? singular : `${singular}s`;
 }
 
 function DashboardUnavailable({
@@ -570,7 +890,7 @@ function operatorInitials(operator: DashboardUser | null) {
   return operator.email.slice(0, 2).toUpperCase();
 }
 
-function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["bookings"]; onBooking: (booking: DashboardOverview["bookings"][number]) => void }) {
+function RecentBookings({ bookings, onBooking, onViewAll }: { bookings: DashboardOverview["bookings"]; onBooking: (booking: DashboardOverview["bookings"][number]) => void; onViewAll: () => void }) {
   return (
     <Card className="recent-bookings" padded={false}>
       <div className="card-header">
@@ -578,7 +898,7 @@ function RecentBookings({ bookings, onBooking }: { bookings: DashboardOverview["
           <h2>Recent Bookings</h2>
           <p>Latest activity from the live API</p>
         </div>
-        <button className="text-action" type="button">
+        <button className="text-action" onClick={onViewAll} type="button">
           View all →
         </button>
       </div>
@@ -1067,7 +1387,7 @@ function humanizeStatus(status: string) {
   return status.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function bookingBadgeStatus(status: string): DashboardOverview["bookings"][number]["status"] {
+export function bookingBadgeStatus(status: string): DashboardOverview["bookings"][number]["status"] {
   if (status === "confirmed") return "confirmed";
   if (status === "pending_payment") return "pending";
   return "cancelled";

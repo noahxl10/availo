@@ -392,7 +392,7 @@ GET /bookings?limit=25&cursor=...
 GET /listings?limit=50&cursor=...
 ```
 
-`GET /bookings` is an authenticated operator API. It derives the tenant from the verified access token and returns `{ "items": [...], "nextCursor": "..." }`, with `limit` defaulting to `25` and capped at `100`. It accepts optional `status`, `fromDate`, and `toDate` filters; dates must be real `YYYY-MM-DD` calendar dates and `fromDate` must not be later than `toDate`. `GET /bookings/:id` must use the same tenant scope and return a generic `404` for both missing and cross-tenant IDs.
+`GET /bookings` is an authenticated operator API. It derives the tenant from the verified access token and returns `{ "items": [...], "nextCursor": "..." }`, with `limit` defaulting to `25` and capped at `100`. It accepts optional `status`, `fromDate`, and `toDate` filters; dates must be real `YYYY-MM-DD` calendar dates and `fromDate` must not be later than `toDate`. The optional `view` parameter accepts `full` or `summary` and defaults to `full` for compatibility. `view=summary` selects and returns only booking ID, customer name, booking date, start time, guest count, status, total cents, and listing ID/title; it excludes contact details, notes, add-ons, payment data, fees, and tenant IDs. Invalid `view` values return `400`. Cursor ordering and tenant/filter scope are identical for both views. `GET /bookings/:id` must use the same tenant scope and return a generic `404` for both missing and cross-tenant IDs.
 
 5. Use select projections:
 

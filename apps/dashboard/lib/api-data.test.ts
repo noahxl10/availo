@@ -8,6 +8,7 @@ import {
   DashboardRateLimitedError,
   createDashboardListingDraft,
   fetchDashboardBookingDetail,
+  fetchDashboardBookings,
   fetchDashboardOverview,
   loginDashboardSession,
   logoutDashboardSession,
@@ -81,6 +82,41 @@ describe("dashboard API data", () => {
     await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toBeInstanceOf(DashboardBookingNotFoundError);
     await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toThrow("Dashboard booking API returned an invalid detail");
     await expect(fetchDashboardBookingDetail("bk_test", "access-token")).rejects.toThrow("Dashboard booking API returned an invalid detail");
+  });
+
+  it("fetches filtered booking pages with bearer auth and projects list fields", async () => {
+    process.env.NEXT_PUBLIC_API_BASE_URL = "https://api.availo.test/";
+    const item = {
+      id: "bk_test", customerName: "Alex Rivera", customerEmail: "private@example.invalid", customerPhone: "555-0100",
+      bookingDate: "2026-03-12", startTime: "09:30", endTime: "10:30", guestCount: 2, adultCount: 2, childCount: 0,
+      status: "confirmed", paymentStatus: "paid", paymentProvider: "stripe", totalCents: 14105, notes: "private note",
+      businessId: "biz_private", paymentReferenceId: "secret_ref", listing: { id: "lst_test", title: "Harbor Kayak Tour", capacity: 8 }
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ items: [item], nextCursor: "opaque-cursor" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const page = await fetchDashboardBookings({ status: "confirmed", fromDate: "2026-03-01", toDate: "2026-03-31" }, "access-token");
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.availo.test/bookings?limit=25&view=summary&status=confirmed&fromDate=2026-03-01&toDate=2026-03-31", {
+      cache: "no-store",
+      headers: { authorization: "Bearer access-token" }
+    });
+    expect(page).toEqual({
+      items: [{ id: "bk_test", customerName: "Alex Rivera", bookingDate: "2026-03-12", startTime: "09:30", guestCount: 2, status: "confirmed", totalCents: 14105, listing: { id: "lst_test", title: "Harbor Kayak Tour" } }],
+      nextCursor: "opaque-cursor"
+    });
+    expect(JSON.stringify(page)).not.toContain("private@example.invalid");
+    expect(JSON.stringify(page)).not.toContain("secret_ref");
+  });
+
+  it("passes opaque cursors and rejects malformed booking list pages", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchDashboardBookings({ cursor: "opaque+/=" }, "access-token")).resolves.toEqual({ items: [], nextCursor: null });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:4000/bookings?limit=25&view=summary&cursor=opaque%2B%2F%3D", expect.any(Object));
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ items: [{ id: "bad" }], nextCursor: null }), { status: 200 })));
+    await expect(fetchDashboardBookings({}, "access-token")).rejects.toThrow("Dashboard bookings API returned an invalid item");
   });
 
   it("creates draft listings with bearer auth and never sends tenant-owned fields", async () => {
