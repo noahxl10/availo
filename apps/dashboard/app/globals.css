@@ -954,6 +954,56 @@ button {
   flex-direction: column;
 }
 
+.bookings-manager {
+  display: flex;
+  flex-direction: column;
+  gap: var(--availo-space-4);
+}
+
+.bookings-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--availo-space-3);
+  padding: var(--availo-space-4);
+  border: 1px solid var(--availo-color-border);
+  border-radius: var(--availo-radius-lg);
+  background: var(--availo-color-neutral-0);
+}
+
+.bookings-filters label {
+  display: grid;
+  gap: var(--availo-space-1);
+  min-width: 170px;
+  color: var(--availo-color-muted);
+  font-size: var(--availo-font-size-xs);
+}
+
+.bookings-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--availo-space-3);
+  padding: var(--availo-space-4);
+  color: var(--availo-color-muted);
+  font-size: var(--availo-font-size-xs);
+}
+
+.bookings-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--availo-space-4);
+  padding: var(--availo-space-4);
+  border: 1px solid var(--availo-color-danger-200);
+  border-radius: var(--availo-radius-lg);
+  color: var(--availo-color-danger-700);
+}
+
+.bookings-table-card {
+  overflow: hidden;
+}
+
 .booking-row {
   appearance: none;
   display: flex;

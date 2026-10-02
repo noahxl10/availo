@@ -56,6 +56,20 @@ export type DashboardBookingDetail = {
   }[];
 };
 
+export type DashboardBookingListItem = {
+  id: string;
+  customerName: string;
+  bookingDate: string;
+  startTime: string;
+  guestCount: number;
+  status: "pending_payment" | "confirmed" | "canceled" | "refunded" | "partially_refunded" | "failed";
+  totalCents: number;
+  listing: { id: string; title: string };
+};
+
+export type DashboardBookingListPage = { items: DashboardBookingListItem[]; nextCursor: string | null };
+export type DashboardBookingListFilters = { status?: string; fromDate?: string; toDate?: string; cursor?: string };
+
 export type DashboardUser = {
   id: string;
   email: string;
@@ -163,6 +177,56 @@ export async function fetchDashboardBookingDetail(bookingId: string, accessToken
   if (response.status === 404) throw new DashboardBookingNotFoundError();
   if (!response.ok) throw new Error(`Dashboard booking API returned ${response.status}`);
   return normalizeDashboardBookingDetail(await response.json());
+}
+
+export async function fetchDashboardBookings(filters: DashboardBookingListFilters, accessToken: string | null): Promise<DashboardBookingListPage> {
+  if (!accessToken) throw new DashboardAuthRequiredError();
+  const query = new URLSearchParams({ limit: "25", view: "summary" });
+  for (const key of ["status", "fromDate", "toDate", "cursor"] as const) {
+    const value = filters[key];
+    if (value) query.set(key, value);
+  }
+  const response = await fetch(`${apiBaseUrl()}/bookings?${query.toString()}`, {
+    cache: "no-store",
+    headers: { authorization: `Bearer ${accessToken}` }
+  });
+  if (response.status === 401) throw new DashboardAuthRequiredError();
+  if (!response.ok) throw new Error(`Dashboard bookings API returned ${response.status}`);
+  return normalizeDashboardBookingListPage(await response.json());
+}
+
+export function normalizeDashboardBookingListPage(payload: unknown): DashboardBookingListPage {
+  if (!payload || typeof payload !== "object") throw new Error("Dashboard bookings API returned an invalid page");
+  const page = payload as { items?: unknown; nextCursor?: unknown };
+  if (!Array.isArray(page.items) || (page.nextCursor !== null && typeof page.nextCursor !== "string")) {
+    throw new Error("Dashboard bookings API returned an invalid page");
+  }
+  return {
+    items: page.items.map(normalizeDashboardBookingListItem),
+    nextCursor: page.nextCursor
+  };
+}
+
+function normalizeDashboardBookingListItem(payload: unknown): DashboardBookingListItem {
+  if (!payload || typeof payload !== "object") throw new Error("Dashboard bookings API returned an invalid item");
+  const booking = payload as Partial<DashboardBookingListItem>;
+  const statuses = ["pending_payment", "confirmed", "canceled", "refunded", "partially_refunded", "failed"];
+  if (typeof booking.id !== "string" || typeof booking.customerName !== "string" || typeof booking.bookingDate !== "string" ||
+      typeof booking.startTime !== "string" || typeof booking.guestCount !== "number" || !Number.isInteger(booking.guestCount) || typeof booking.totalCents !== "number" ||
+      !Number.isInteger(booking.totalCents) || typeof booking.status !== "string" || !statuses.includes(booking.status) ||
+      !booking.listing || typeof booking.listing.id !== "string" || typeof booking.listing.title !== "string") {
+    throw new Error("Dashboard bookings API returned an invalid item");
+  }
+  return {
+    id: booking.id,
+    customerName: booking.customerName,
+    bookingDate: booking.bookingDate,
+    startTime: booking.startTime,
+    guestCount: booking.guestCount,
+    status: booking.status as DashboardBookingListItem["status"],
+    totalCents: booking.totalCents,
+    listing: { id: booking.listing.id, title: booking.listing.title }
+  };
 }
 
 export async function createDashboardListingDraft(input: DashboardListingDraftInput, accessToken: string | null): Promise<DashboardListingDraft> {

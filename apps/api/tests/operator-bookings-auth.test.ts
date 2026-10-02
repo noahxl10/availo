@@ -63,6 +63,12 @@ describe("authenticated operator booking reads", () => {
         const firstPage = (await firstPageResponse.json()) as BookingPage;
 
         expect(firstPage.items.map((booking) => booking.id)).toEqual([fixture.bookingIds[2], fixture.bookingIds[1]]);
+        expect(firstPage.items[0]).toHaveProperty("customerEmail");
+        expect(firstPage.items[0]).toHaveProperty("customerPhone");
+        expect(firstPage.items[0]).toHaveProperty("notes");
+        expect(firstPage.items[0]).toHaveProperty("addOns");
+        expect(firstPage.items[0]).toHaveProperty("paymentStatus");
+        expect(firstPage.items[0]).toHaveProperty("platformFeeCents");
         expect(firstPage.items.every((booking) => !("businessId" in booking))).toBe(true);
         expect(JSON.stringify(firstPage)).not.toContain(otherFixture.businessId);
         expect(JSON.stringify(firstPage)).not.toContain("paymentReferenceId");
@@ -197,6 +203,49 @@ describe("authenticated operator booking reads", () => {
     }
   });
 
+  it("returns an allowlisted summary view while preserving tenant filters and cursor pagination", async () => {
+    const fixture = await createBookingReadFixture("tenant-summary", 0);
+    const otherFixture = await createBookingReadFixture("tenant-summary-hidden", 0);
+    const matchingOld = "bok_summary_old";
+    const matchingNew = "bok_summary_new";
+    const hidden = "bok_summary_hidden";
+
+    try {
+      await createFixtureBooking(fixture.businessId, fixture.listingId, matchingOld, new Date(Date.UTC(2026, 0, 5, 12, 0, 0)), "summary-old", {
+        bookingDate: "2026-02-10", status: "confirmed", paymentStatus: "paid"
+      });
+      await createFixtureBooking(fixture.businessId, fixture.listingId, matchingNew, new Date(Date.UTC(2026, 0, 6, 12, 0, 0)), "summary-new", {
+        bookingDate: "2026-02-11", status: "confirmed", paymentStatus: "paid"
+      });
+      await createFixtureBooking(otherFixture.businessId, otherFixture.listingId, hidden, new Date(Date.UTC(2026, 0, 7, 12, 0, 0)), "summary-hidden", {
+        bookingDate: "2026-02-11", status: "confirmed", paymentStatus: "paid"
+      });
+
+      await withHttpApp({ JWT_ACCESS_SECRET: jwtSecret }, async (baseUrl) => {
+        const token = await signToken(fixture.userId, fixture.businessId);
+        const query = "?view=summary&status=confirmed&fromDate=2026-02-10&toDate=2026-02-11&limit=1";
+        const firstResponse = await getBookings(baseUrl, token, query);
+        expect(firstResponse.status).toBe(200);
+        const first = await firstResponse.json() as BookingPage;
+        expect(first.items.map((booking) => booking.id)).toEqual([matchingNew]);
+        expect(first.nextCursor).toEqual(expect.any(String));
+        expect(Object.keys(first.items[0]!).sort()).toEqual(["bookingDate", "customerName", "guestCount", "id", "listing", "startTime", "status", "totalCents"].sort());
+        expect(Object.keys(first.items[0]!.listing as Record<string, unknown>).sort()).toEqual(["id", "title"]);
+        expect(JSON.stringify(first)).not.toContain(otherFixture.businessId);
+        expect(JSON.stringify(first)).not.toContain("paymentReferenceId");
+        expect(JSON.stringify(first)).not.toContain("customerEmail");
+
+        const cursor = first.nextCursor!;
+        const secondResponse = await getBookings(baseUrl, token, `${query}&cursor=${encodeURIComponent(cursor)}`);
+        expect(secondResponse.status).toBe(200);
+        await expect(secondResponse.json()).resolves.toMatchObject({ items: [{ id: matchingOld }], nextCursor: null });
+      });
+    } finally {
+      await cleanupBookingReadFixture(otherFixture.businessId);
+      await cleanupBookingReadFixture(fixture.businessId);
+    }
+  });
+
   it("caps invalid pagination input before reading bookings", async () => {
     const fixture = await createBookingReadFixture("tenant-pagination", 1);
 
@@ -208,6 +257,7 @@ describe("authenticated operator booking reads", () => {
         await expect(getBookings(baseUrl, token, "?limit=not-a-number")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?cursor=not-a-cursor")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?status=paid")).resolves.toMatchObject({ status: 400 });
+        await expect(getBookings(baseUrl, token, "?view=internal")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?fromDate=2026-02-30")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?toDate=02-28-2026")).resolves.toMatchObject({ status: 400 });
         await expect(getBookings(baseUrl, token, "?fromDate=2026-03-01&toDate=2026-02-28")).resolves.toMatchObject({ status: 400 });
@@ -618,7 +668,7 @@ describe("authenticated operator booking reads", () => {
 });
 
 type BookingPage = {
-  items: { id: string; status: string }[];
+  items: { id: string; status: string; listing?: unknown; [key: string]: unknown }[];
   nextCursor: string | null;
 };
 
